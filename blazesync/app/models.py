@@ -16,7 +16,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, Numeric, UniqueConstraint
+from sqlalchemy import Column, JSON, Numeric, String, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
@@ -150,6 +150,8 @@ class MemberRecord(SQLModel, table=True):
     matric_number: str | None = Field(default=None, index=True)
     email: str = Field(index=True)
     phone: str | None = None
+    # Academic level used for per-level dues pricing ("100L"…"500L").
+    level: str = Field(default="300L", sa_column=Column(String(8), nullable=False, server_default="300L"))
     user_id: uuid.UUID | None = Field(default=None, foreign_key="user.id", index=True)
     invite_code: str = Field(unique=True, index=True)
     invite_status: InviteStatus = Field(
@@ -174,6 +176,9 @@ class DuesCycle(SQLModel, table=True):
     association_id: uuid.UUID = Field(foreign_key="association.id", index=True)
     title: str
     amount: float = Field(sa_column=Column(Numeric(18, 2), nullable=False))
+    # Optional per-level overrides: {"100L": 2000, "300L": 5000}. When absent
+    # every member pays the flat amount.
+    per_level: dict | None = Field(default=None, sa_column=Column(JSON(), nullable=True))
     deadline: datetime
     created_by: uuid.UUID = Field(foreign_key="user.id")
     status: CycleStatus = Field(

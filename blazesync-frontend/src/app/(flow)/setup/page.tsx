@@ -36,6 +36,7 @@ export default function SetupWizard() {
   const [step, setStep] = useState(0);
   const [assoc, setAssoc] = useState({ name: "", shortName: "", institution: "University of Lagos", faculty: "", department: "" });
   const [last4, setLast4] = useState<string | null>(null);
+  const [accountRef, setAccountRef] = useState<string | null>(null);
   const [cosigs, setCosigs] = useState<Cosig[]>([{ name: "", contact: "", title: "Financial Secretary" }]);
   const [required, setRequired] = useState(2);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -69,7 +70,7 @@ export default function SetupWizard() {
 
   const finish = async () => {
     setBusy(true);
-    const r = await createAssociation({ ...assoc, name: assoc.name.trim(), shortName: assoc.shortName.trim(), accountLast4: last4!, cosignatories: cosigs, required });
+    const r = await createAssociation({ ...assoc, name: assoc.name.trim(), shortName: assoc.shortName.trim(), accountLast4: last4!, accountRef, cosignatories: cosigs, required });
     setBusy(false);
     if (r.ok) {
       toast(`${assoc.shortName.trim()} is set up. Your co-signatories have been invited.`);
@@ -126,7 +127,13 @@ export default function SetupWizard() {
               <Button onClick={() => setStep(2)}>Continue</Button>
             </>
           ) : (
-            <LinkAccountFlow associationName={assoc.shortName || "your association"} onLinked={(l4) => setLast4(l4)} />
+            <LinkAccountFlow
+              associationName={assoc.shortName || "your association"}
+              onLinked={(ref) => {
+                setAccountRef(ref);
+                setLast4(ref.slice(-4));
+              }}
+            />
           )}
           <button type="button" onClick={() => setStep(0)} className="block text-sm font-semibold text-brand hover:underline">
             Back to association details

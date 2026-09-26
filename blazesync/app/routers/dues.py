@@ -32,6 +32,8 @@ class CreateCycleBody(BaseModel):
     title: str = Field(min_length=2, max_length=160)
     amount: float = Field(gt=0)
     deadline: datetime
+    # Optional per-level overrides in naira: {"100L": 2000, "300L": 5000}.
+    per_level: dict[str, float] | None = None
 
 
 @router.post("/associations/{assoc_id}/dues-cycles", status_code=201)
@@ -45,6 +47,7 @@ def create_cycle(
         association_id=assoc_id,
         title=body.title.strip(),
         amount=Decimal(str(body.amount)),
+        per_level={k: float(v) for k, v in body.per_level.items()} if body.per_level else None,
         deadline=body.deadline,
         created_by=membership.user_id,
     )
@@ -157,11 +160,17 @@ def pay(
             "claim your invite first",
         )
 
+    # Per-level pricing overrides the flat amount when the cycle defines it
+    # for the payer's level (spec 4.2).
+    per_level = cycle.per_level or {}
+    level_amount = per_level.get(record.level)
+    amount = Decimal(str(level_amount)) if level_amount is not None else Decimal(str(cycle.amount))
+
     payment = payments_service.pay_dues(
         session,
         cycle=cycle,
         member_record=record,
-        amount=Decimal(str(cycle.amount)),
+        amount=amount,
         paid_via=body.paid_via,
         idempotency_key=body.idempotency_key.strip(),
     )
@@ -255,6 +264,7 @@ def _cycle_dict(cycle: DuesCycle) -> dict:
         "association_id": str(cycle.association_id),
         "title": cycle.title,
         "amount": str(cycle.amount),
+        "per_level": {k: str(v) for k, v in cycle.per_level.items()} if cycle.per_level else None,
         "deadline": cycle.deadline.isoformat(),
         "status": cycle.status.value,
         "created_at": cycle.created_at.isoformat(),

@@ -125,13 +125,13 @@ function toAssociation(w: ApiAssociation): Association {
   };
 }
 
-function toCycle(w: { id: string; association_id: string; title: string; amount: string; deadline: string; status: "active" | "closed"; created_at: string }): DuesCycle {
+function toCycle(w: { id: string; association_id: string; title: string; amount: string; per_level: Record<string, string> | null; deadline: string; status: "active" | "closed"; created_at: string }): DuesCycle {
   return {
     id: w.id,
     associationId: w.association_id,
     title: w.title,
     amount: kobo(w.amount),
-    perLevel: null,
+    perLevel: w.per_level ? Object.fromEntries(Object.entries(w.per_level).map(([k, v]) => [k, kobo(v)])) : null,
     deadline: w.deadline,
     openedAt: w.created_at,
     status: w.status === "active" ? "open" : "closed",
@@ -281,6 +281,7 @@ function useStoreValue() {
   const [roleSwitchTo, setRoleSwitchTo] = useState<string | null>(null);
   const [arrived, setArrived] = useState<string[]>([]);
   const [lastEventAt, setLastEventAt] = useState<number>(0);
+  const [liveChecked, setLiveChecked] = useState(false);
   const idem = useRef(new Map<string, Promise<unknown>>());
   const dbRef = useRef<DbState | null>(null);
   useEffect(() => {
@@ -326,8 +327,10 @@ function useStoreValue() {
     setOnline(typeof navigator === "undefined" ? true : navigator.onLine);
     setLastEventAt(Date.now());
     // A persisted demo session always boots in demo mode; live sessions are
-    // recognised by the token pair the API client persists.
+    // recognised by the token pair the API client persists and re-established
+    // from the server (restoreLiveSession) once the app is interactive.
     setMode(hasTokens() ? "live" : "demo");
+    setLiveChecked(!hasTokens());
     setReady(true);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
@@ -641,6 +644,25 @@ function useStoreValue() {
     setSession((s) => (s ? { ...s, associationId } : s));
   }, []);
 
+  /** Re-establish a live session from the stored token pair (page reloads). */
+  const restoreLiveSession = useCallback(async (): Promise<Session | null> => {
+    try {
+      const m = await api.memberships();
+      const s = applyMemberships(m);
+      if (s) await loadAssociation(s.associationId);
+      return s;
+    } catch {
+      // Tokens are dead or the server is unreachable: fall back to demo so
+      // the app still boots (the user can log in again).
+      clearTokens();
+      setSession(null);
+      setMode("demo");
+      return null;
+    } finally {
+      setLiveChecked(true);
+    }
+  }, [applyMemberships, loadAssociation]);
+
   /** Live sign-in shared by the login and claim screens. */
   const signInLive = useCallback(
     async (email: string, password: string): Promise<Result> => {
@@ -827,7 +849,7 @@ function useStoreValue() {
   async function importRoster(associationId: string, rows: { name: string; matric: string; email: string; phone: string; level: Level }[], fileName: string): Promise<Result<number>> {
     if (modeRef.current === "live") {
       try {
-        const csv = ["name,matric_number,email,phone", ...rows.map((r) => `${r.name},${r.matric},${r.email},${r.phone}`)].join("\n");
+        const csv = ["name,matric_number,email,phone,level", ...rows.map((r) => `${r.name},${r.matric},${r.email},${r.phone},${r.level}`)].join("\n");
         const r = await api.uploadRoster(associationId, new File([csv], fileName, { type: "text/csv" }));
         await loadAssociation(associationId, { silent: true });
         return { ok: true, value: r.created };
@@ -881,7 +903,12 @@ function useStoreValue() {
   async function openCycle(input: { associationId: string; title: string; amount: number; perLevel: Partial<Record<Level, number>> | null; deadline: string }): Promise<Result<string>> {
     if (modeRef.current === "live") {
       try {
-        const c = await api.createCycle(input.associationId, { title: input.title, amount: input.amount / 100, deadline: input.deadline });
+        const c = await api.createCycle(input.associationId, {
+          title: input.title,
+          amount: input.amount / 100,
+          deadline: input.deadline,
+          ...(input.perLevel ? { per_level: Object.fromEntries(Object.entries(input.perLevel).map(([k, v]) => [k, v / 100])) } : {}),
+        });
         await loadAssociation(input.associationId, { silent: true });
         return { ok: true, value: c.id };
       } catch (e) {
@@ -1134,6 +1161,7 @@ function useStoreValue() {
     faculty: string;
     department: string;
     accountLast4: string;
+    accountRef?: string | null;
     cosignatories: { name: string; contact: string; title: ExcoTitle }[];
     required: number;
   }): Promise<Result<string>> {
@@ -1145,8 +1173,8 @@ function useStoreValue() {
           department_or_faculty: input.department || input.faculty,
           approval_threshold: Math.max(2, input.required),
         });
-        if (input.accountLast4) {
-          await api.linkAccount(a.id, `ECO-${input.accountLast4}-${Date.now()}`).catch(() => {});
+        if (input.accountRef) {
+          await api.linkAccount(a.id, input.accountRef).catch(() => {});
         }
         for (const c of input.cosignatories) {
           if (c.contact.includes("@")) await api.inviteExco(a.id, { name: c.name, email: c.contact }).catch(() => {});
@@ -1195,10 +1223,10 @@ function useStoreValue() {
     return { ok: true, value: id };
   }
 
-  async function linkAccount(associationId: string, last4: string): Promise<Result> {
+  async function linkAccount(associationId: string, accountRef: string): Promise<Result> {
     if (modeRef.current === "live") {
       try {
-        await api.linkAccount(associationId, `ECO-${last4}-${Date.now()}`);
+        await api.linkAccount(associationId, accountRef);
         await loadAssociation(associationId, { silent: true });
         return { ok: true, value: undefined };
       } catch {
@@ -1209,9 +1237,9 @@ function useStoreValue() {
     if (!isExco(associationId)) return { ok: false, error: "not_exco" };
     update((draft) => {
       const a = draft.associations.find((x) => x.id === associationId)!;
-      a.linkedAccount = { bank: "Ecobank", accountName: a.shortName.toUpperCase(), last4, linkedAt: new Date().toISOString(), linkedBy: session!.userId, scopes: ["balance", "collect", "payout"] };
+      a.linkedAccount = { bank: "Ecobank", accountName: a.shortName.toUpperCase(), last4: accountRef.slice(-4), linkedAt: new Date().toISOString(), linkedBy: session!.userId, scopes: ["balance", "collect", "payout"] };
       draft.bankBalance[associationId] = draft.bankBalance[associationId] ?? 0;
-      audit(draft, associationId, session!.userId, "account_linked", `Linked the Ecobank business account ending ${last4}`);
+      audit(draft, associationId, session!.userId, "account_linked", `Linked the Ecobank business account ending ${accountRef.slice(-4)}`);
     });
     return { ok: true, value: undefined };
   }
@@ -1338,6 +1366,7 @@ function useStoreValue() {
 
   return {
     ready,
+    liveChecked,
     db,
     session,
     mode,
@@ -1352,6 +1381,7 @@ function useStoreValue() {
     setLiveEnabled,
     signInDemo,
     signInLive,
+    restoreLiveSession,
     signOut,
     switchAssociation,
     loadAssociation,

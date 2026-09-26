@@ -132,9 +132,9 @@ export default function SettingsPage() {
           <Panel className="p-5">
             <LinkAccountFlow
               associationName={assoc.shortName}
-              onLinked={async (last4) => {
-                await store.linkAccount(assocId, last4);
-                toast(`Linked the Ecobank account ending ${last4}.`);
+              onLinked={async (accountRef) => {
+                await store.linkAccount(assocId, accountRef);
+                toast(`Linked the Ecobank account ending ${accountRef.slice(-4)}.`);
               }}
             />
           </Panel>

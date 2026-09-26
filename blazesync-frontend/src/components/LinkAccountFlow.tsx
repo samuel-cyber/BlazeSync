@@ -18,7 +18,7 @@ const CANNOT = ["See any other account, including your personal one", "Move mone
  * account's banking password: the bank sends a one-time code to the phone
  * registered on the account, which proves the treasurer controls it.
  */
-export function LinkAccountFlow({ associationName, onLinked, compact = false }: { associationName: string; onLinked: (last4: string) => Promise<void> | void; compact?: boolean }) {
+export function LinkAccountFlow({ associationName, onLinked, compact = false }: { associationName: string; onLinked: (accountRef: string) => Promise<void> | void; compact?: boolean }) {
   const [step, setStep] = useState<"consent" | "account" | "otp">("consent");
   const [acct, setAcct] = useState("");
   const [otp, setOtp] = useState("");
@@ -113,7 +113,7 @@ export function LinkAccountFlow({ associationName, onLinked, compact = false }: 
           setTries((t) => t - 1);
           return setErr(tries - 1 > 0 ? `That code is wrong. ${tries - 1} ${tries - 1 === 1 ? "try" : "tries"} left.` : "Too many wrong codes. Choose \u201cUse a different account\u201d, then send a new code.");
         }
-        await onLinked(acct.slice(-4));
+        await onLinked(acct);
         setBusy(false);
       }}
     >

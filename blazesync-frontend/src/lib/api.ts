@@ -286,7 +286,7 @@ export const api = {
   },
 
   // ---------------- dues + payments
-  createCycle(assocId: string, input: { title: string; amount: number; deadline: string }): Promise<ApiCycle> {
+  createCycle(assocId: string, input: { title: string; amount: number; deadline: string; per_level?: Record<string, number> }): Promise<ApiCycle> {
     return api.request(`/api/v1/associations/${assocId}/dues-cycles`, { method: "POST", body: input });
   },
   cycles(assocId: string): Promise<{ items: ApiCycle[] }> {
@@ -350,6 +350,7 @@ export interface ApiCycle {
   association_id: string;
   title: string;
   amount: string;
+  per_level: Record<string, string> | null;
   deadline: string;
   status: "active" | "closed";
   created_at: string;

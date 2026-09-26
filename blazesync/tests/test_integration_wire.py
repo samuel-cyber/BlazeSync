@@ -109,3 +109,39 @@ def test_patch_association_threshold(client, treasurer, association):
         headers=headers,
     )
     assert r2.status_code == 422
+
+
+def test_roster_level_roundtrip(client, treasurer, association):
+    """CSV level column survives import and shows up on the roster view."""
+    headers = {"Authorization": f"Bearer {treasurer['tokens']['access_token']}"}
+    csv = "name,matric_number,email,phone,level\nAda Obi,260805001,ada2@example.com,08030001122,100L\n"
+    up = client.post(
+        f"/api/v1/associations/{association['id']}/roster/upload",
+        files={"file": ("roster.csv", csv.encode(), "text/csv")},
+        headers=headers,
+    )
+    assert up.status_code == 200, up.text
+    r = client.get(f"/api/v1/associations/{association['id']}/roster", headers=headers)
+    assert r.status_code == 200, r.text
+    item = next(i for i in r.json()["items"] if i["name"] == "Ada Obi")
+    assert item["level"] == "100L"
+
+
+def test_cycle_per_level_roundtrip(client, treasurer, association):
+    """A cycle can carry per-level pricing and reports it back on the wire."""
+    import datetime as dt
+
+    headers = {"Authorization": f"Bearer {treasurer['tokens']['access_token']}"}
+    body = {
+        "title": "Dues 2026",
+        "amount": 5000.0,
+        "deadline": (dt.datetime.now(dt.UTC) + dt.timedelta(days=30)).isoformat(),
+        "per_level": {"100L": 3000.0, "300L": 5000.0},
+    }
+    r = client.post(f"/api/v1/associations/{association['id']}/dues-cycles", json=body, headers=headers)
+    assert r.status_code == 201, r.text
+    cycle = r.json()
+    assert cycle["per_level"] == {"100L": "3000.0", "300L": "5000.0"}
+    listing = client.get(f"/api/v1/associations/{association['id']}/dues-cycles", headers=headers)
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["per_level"] is not None

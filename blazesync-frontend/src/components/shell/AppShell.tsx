@@ -42,8 +42,16 @@ export function AppShell({ role, children }: { role: "exco" | "member"; children
   // against the seeded store (a reset can invalidate them).
   const valid = store.mode === "live" || (!!db && !!session && sessionIsValid(db, session));
 
+  // A reload starts with tokens but no session: re-establish it from the server
+  // before deciding the user isn't logged in.
+  useEffect(() => {
+    if (!ready || store.mode !== "live" || store.liveChecked || session) return;
+    void store.restoreLiveSession();
+  }, [ready, store.mode, store.liveChecked, session, store]);
+
   useEffect(() => {
     if (!ready || !db) return;
+    if (store.mode === "live" && !store.liveChecked) return; // restore in flight
     if (!session) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
     else if (session.role !== role) router.replace(store.roleSwitchTo ?? (session.role === "exco" ? "/exco" : "/member"));
     else if (!valid) {

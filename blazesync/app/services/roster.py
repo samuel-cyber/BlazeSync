@@ -95,12 +95,15 @@ def import_roster(
             )
         ).first()
         if existing:
-            # Refresh name/matric/phone on re-upload, keep invite state.
+            # Refresh name/matric/phone/level on re-upload, keep invite state.
             existing.name = full_name
             existing.matric_number = (
                 row.get("matric_number") or row.get("matric") or existing.matric_number
             )
             existing.phone = row.get("phone") or existing.phone
+            existing.level = (
+                row.get("level") or existing.level
+            )
             session.add(existing)
             continue
 
@@ -110,6 +113,7 @@ def import_roster(
             matric_number=row.get("matric_number") or row.get("matric") or None,
             email=email,
             phone=row.get("phone") or None,
+            level=row.get("level") or "300L",
             invite_code=generate_invite_code(),
             invite_status=InviteStatus.pending,
         )
@@ -250,6 +254,7 @@ def roster_view(
                 "claimed": record.user_id is not None,
                 "claimed_by": user.name if user else None,
                 "claimed_by_id": str(record.user_id) if record.user_id else None,
+                "level": record.level,
                 "invite_status": record.invite_status.value,
                 "paid": record.id in paid_member_ids if active_cycle else None,
             }
