@@ -5,14 +5,21 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from .. import audit as audit_service
 from ..db import get_session
 from ..deps import get_current_user, require_association, require_role
 from ..ecobank import EcobankError
 from ..ecobank import client as ecobank_client
-from ..models import Association, Membership, Role, User
+from ..models import (
+    Association,
+    InviteStatus,
+    MemberRecord,
+    Membership,
+    Role,
+    User,
+)
 from ..security import hash_password
 
 router = APIRouter(prefix="/associations", tags=["associations"])
@@ -65,6 +72,114 @@ def _association_dict(assoc: Association, caller_role: Role) -> dict:
         "your_role": caller_role.value,
         "created_at": assoc.created_at.isoformat(),
     }
+
+
+class JoinBody(BaseModel):
+    full_name: str = Field(min_length=2, max_length=120)
+    matric_number: str = Field(min_length=3, max_length=40)
+    level: str = Field(default="", max_length=8)
+
+
+@router.post("/{assoc_id}/join", status_code=201)
+def join_by_code(
+    assoc_id: uuid.UUID,
+    body: JoinBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Self-service join with the association's shared code.
+
+    Creates (or reuses) the caller's roster record so dues tracking covers
+    people who never received an individual invite.
+    """
+    from ..services import roster as roster_service
+
+    assoc = session.get(Association, assoc_id)
+    if assoc is None:
+        raise HTTPException(status_code=404, detail="Association not found")
+    existing = session.exec(
+        select(MemberRecord).where(
+            MemberRecord.association_id == assoc_id,
+            MemberRecord.matric_number == body.matric_number.strip(),
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="That matric number is already on this roster")
+    record = MemberRecord(
+        association_id=assoc_id,
+        name=body.full_name.strip(),
+        matric_number=body.matric_number.strip(),
+        email=user.email,
+        phone=user.phone,
+        user_id=user.id,
+        invite_code=roster_service.generate_invite_code(),
+    )
+    record.invite_status = InviteStatus.claimed
+    session.add(record)
+    if session.exec(
+        select(Membership).where(Membership.user_id == user.id, Membership.association_id == assoc_id)
+    ).first() is None:
+        session.add(Membership(user_id=user.id, association_id=assoc_id, role=Role.member))
+    audit_service.audit(
+        session,
+        action="invite_claimed",
+        actor_id=user.id,
+        metadata={"association_id": str(assoc_id), "member_record_id": str(record.id), "via": "join_code"},
+    )
+    session.commit()
+    return {"ok": True, "member_record_id": str(record.id)}
+
+
+@router.get("/by-code/{join_code}")
+def association_by_code(join_code: str, session: Session = Depends(get_session)):
+    """Public summary behind a shared join code (the /join screen)."""
+    code = join_code.strip().upper()
+    assoc = session.exec(select(Association).where(func.upper(func.replace(Association.name, " ", "")) == code)).first()
+    if assoc is None:
+        raise HTTPException(status_code=404, detail="No association uses that code")
+    roster_count = session.exec(
+        select(func.count()).select_from(MemberRecord).where(MemberRecord.association_id == assoc.id)
+    ).one()
+    return {
+        "id": str(assoc.id),
+        "name": assoc.name,
+        "institution": assoc.institution,
+        "department_or_faculty": assoc.department_or_faculty,
+        "approval_threshold": assoc.approval_threshold,
+        "account_linked": bool(assoc.treasury_account_ref),
+        "treasury_account_ref": assoc.treasury_account_ref,
+        "your_role": "member",
+        "created_at": assoc.created_at.isoformat(),
+        "member_count": roster_count,
+    }
+
+
+class PatchAssociationBody(BaseModel):
+    approval_threshold: int = Field(ge=2, le=10)
+
+
+@router.patch("/{assoc_id}")
+def patch_association(
+    assoc_id: uuid.UUID,
+    body: PatchAssociationBody,
+    membership=Depends(require_role(Role.treasurer)),
+    session: Session = Depends(get_session),
+):
+    """Treasurer-only settings update (approval threshold; min 2 by design)."""
+    assoc = session.get(Association, assoc_id)
+    if assoc is None:
+        raise HTTPException(status_code=404, detail="Association not found")
+    assoc.approval_threshold = body.approval_threshold
+    session.add(assoc)
+    audit_service.audit(
+        session,
+        action="rule_changed",
+        actor_id=membership.user_id,
+        metadata={"association_id": str(assoc.id), "threshold": body.approval_threshold},
+    )
+    session.commit()
+    session.refresh(assoc)
+    return _association_dict(assoc, membership.role)
 
 
 @router.get("/{assoc_id}")

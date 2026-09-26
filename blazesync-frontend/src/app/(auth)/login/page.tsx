@@ -9,22 +9,16 @@ import { Callout } from "@/components/ui/bits";
 import { Field, Input } from "@/components/ui/Field";
 import { useStore } from "@/lib/store";
 
-const DEMO_ACCOUNTS: Record<string, "exco" | "member"> = {
-  "tunde.bakare@live.unilag.edu.ng": "exco",
-  "adaeze.okafor@gmail.com": "member",
-};
-
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next");
-  const { signInDemo } = useStore();
+  const { signInDemo, signInLive } = useStore();
   const [id, setId] = useState("");
   const [pw, setPw] = useState("");
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tries, setTries] = useState(0);
 
   const go = (role: "exco" | "member") => {
     signInDemo(role);
@@ -35,20 +29,23 @@ function LoginForm() {
     e.preventDefault();
     setError(null);
     if (!id.trim() || !pw) {
-      setError("Enter your email or phone number and your password.");
-      return;
-    }
-    if (tries >= 4) {
-      setError("Too many attempts. For your security, wait 5 minutes or reset your password.");
+      setError("Enter your email and your password.");
       return;
     }
     setBusy(true);
-    await new Promise((r) => setTimeout(r, 700));
+    const r = await signInLive(id.trim(), pw);
     setBusy(false);
-    const role = DEMO_ACCOUNTS[id.trim().toLowerCase()];
-    if (role && pw === "blazesync") return go(role);
-    setTries((t) => t + 1);
-    setError("That email or phone and password don't match. Check for typos, or reset your password.");
+    if (!r.ok) {
+      setError(
+        r.error === "mismatch"
+          ? "That email and password don't match. Check for typos, or reset your password."
+          : r.error === "no_association"
+            ? "You're not on any association's roster yet. Join with an invite link or code first."
+            : "We couldn't reach the server. Check your connection and try again.",
+      );
+      return;
+    }
+    router.push(next ?? "/exco");
   };
 
   return (
@@ -60,7 +57,7 @@ function LoginForm() {
 
       <form onSubmit={submit} className="space-y-5" noValidate>
         {error && <Callout tone="danger" role="alert" title={error} />}
-        <Field label="Email or phone number">
+        <Field label="Email">
           {(a) => <Input {...a} autoComplete="username" value={id} onChange={(e) => setId(e.target.value)} placeholder="you@live.unilag.edu.ng" />}
         </Field>
         <Field label="Password">
@@ -92,9 +89,9 @@ function LoginForm() {
 
       <section aria-labelledby="demo" className="space-y-3 rounded-md border border-dashed border-edge/70 p-4">
         <h2 id="demo" className="text-sm font-semibold">
-          Demo accounts
+          Try the demo
         </h2>
-        <p className="text-sm text-ink-2">No backend needed. Both use the password <span className="font-mono font-semibold text-ink">blazesync</span>, or skip straight in:</p>
+        <p className="text-sm text-ink-2">Sample data, no account needed:</p>
         <div className="grid gap-2 sm:grid-cols-2">
           <Button variant="secondary" size="sm" onClick={() => go("exco")} type="button">
             Treasurer (Tunde)

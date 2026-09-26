@@ -6,7 +6,7 @@ import { Suspense, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Callout } from "@/components/ui/bits";
 import { Checkbox, Field, Input } from "@/components/ui/Field";
-import { normalisePhone } from "@/lib/csv";
+import { api, ApiError } from "@/lib/api";
 import { SIGNUP_KEY } from "@/lib/store";
 
 function strength(pw: string): { label: string; tone: string; width: string } | null {
@@ -35,23 +35,29 @@ function SignupForm() {
     const errs: Record<string, string> = {};
     if (name.trim().split(/\s+/).length < 2) errs.name = "Enter your first and last name.";
     const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(id.trim());
-    if (!isEmail && !normalisePhone(id)) errs.id = "Enter an email address, or a Nigerian phone number like 0803 123 4567.";
+    if (!isEmail) errs.id = "Enter an email address — the backend registers by email.";
     if (pw.length < 8) errs.pw = "Use at least 8 characters.";
     if (!agree) errs.agree = "You need to agree before we can create your account.";
     setErrors(errs);
     if (Object.keys(errs).length) return;
     setBusy(true);
-    await new Promise((r) => setTimeout(r, 800));
-    if (id.trim().toLowerCase() === "tunde.bakare@live.unilag.edu.ng") {
+    try {
+      await api.register({ name: name.trim(), email: id.trim().toLowerCase(), password: pw });
+    } catch (err) {
       setBusy(false);
-      setErrors({ id: "There's already an account with this email. Log in instead, or reset your password." });
+      if (err instanceof ApiError && err.status === 409) {
+        setErrors({ id: "There's already an account with this email. Log in instead, or reset your password." });
+      } else {
+        setErrors({ id: "We couldn't create the account. Check your connection and try again." });
+      }
       return;
     }
+    setBusy(false);
     try {
       sessionStorage.setItem(SIGNUP_KEY, JSON.stringify({ name: name.trim(), contact: id.trim() }));
     } catch {}
     const next = invite ? `/claim/${invite}` : intent === "exco" ? "/setup" : "/welcome";
-    router.push(`/verify?to=${encodeURIComponent(id.trim())}&next=${encodeURIComponent(next)}`);
+    router.push(next);
   };
 
   return (

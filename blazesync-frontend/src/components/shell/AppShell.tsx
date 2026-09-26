@@ -38,7 +38,9 @@ export function AppShell({ role, children }: { role: "exco" | "member"; children
   const router = useRouter();
   const pathname = usePathname();
 
-  const valid = !!db && !!session && sessionIsValid(db, session);
+  // Live sessions are validated by the server; only demo sessions are checked
+  // against the seeded store (a reset can invalidate them).
+  const valid = store.mode === "live" || (!!db && !!session && sessionIsValid(db, session));
 
   useEffect(() => {
     if (!ready || !db) return;

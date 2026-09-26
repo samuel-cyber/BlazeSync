@@ -249,6 +249,7 @@ def roster_view(
                 "phone": record.phone,
                 "claimed": record.user_id is not None,
                 "claimed_by": user.name if user else None,
+                "claimed_by_id": str(record.user_id) if record.user_id else None,
                 "invite_status": record.invite_status.value,
                 "paid": record.id in paid_member_ids if active_cycle else None,
             }

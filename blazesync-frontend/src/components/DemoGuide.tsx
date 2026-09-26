@@ -104,6 +104,8 @@ export function DemoGuide() {
   const pathname = usePathname();
   const toast = useToast();
   const [open, setOpen] = useState(false);
+  // The script walks seeded demo data; it makes no sense against a live backend.
+  const demoOnly = store.mode === "demo";
   const [closing, setClosing] = useState(false);
   const [done, setDone] = useState<string[]>([]);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -156,6 +158,8 @@ export function DemoGuide() {
   const inPortal = pathname.startsWith("/exco") || pathname.startsWith("/member");
   const onSignBar = /^\/exco\/payouts\/(?!new)[^/]+$/.test(pathname);
   const lift = onSignBar ? "bottom-[15.5rem] lg:bottom-24" : inPortal ? "bottom-[5.25rem] lg:bottom-6" : "bottom-5 lg:bottom-6";
+
+  if (!demoOnly) return null;
 
   return (
     <div className="no-print">

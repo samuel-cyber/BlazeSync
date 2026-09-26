@@ -151,7 +151,7 @@ export default function SettingsPage() {
         </Panel>
       </Section>
 
-      <Section title="Demo controls" id="demo">
+      <Section title="Demo controls" id="demo" className={store.mode === "live" ? "hidden" : undefined}>
         <Panel className="divide-y divide-rule px-4">
           <p className="py-3 text-sm text-ink-2">For showing BlazeSync off. None of this exists in the real product.</p>
           <Switch checked={store.liveStatus === "live"} onChange={(v) => store.setLiveEnabled(v)} label="Live payments" hint="A new member payment lands every 15 to 25 seconds." />
@@ -195,11 +195,11 @@ export default function SettingsPage() {
             </Button>
             <Button
               variant="danger"
-              onClick={async () => {
-                await store.disconnectAccount(assocId);
-                setDisconnecting(false);
-                toast("Disconnected. BlazeSync can no longer read or move money in that account.");
-              }}
+            onClick={async () => {
+              await store.disconnectAccount(assocId);
+              setDisconnecting(false);
+              toast("Disconnected. BlazeSync can no longer read or move money in that account.");
+            }}
             >
               Disconnect
             </Button>

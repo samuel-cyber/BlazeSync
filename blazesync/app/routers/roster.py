@@ -18,9 +18,12 @@ from ..audit import audit
 from ..db import get_session
 from ..deps import get_current_user, require_role
 from ..models import (
+    Association,
     CycleStatus,
     DuesCycle,
     MemberRecord,
+    Payment,
+    PaymentStatus,
     Role,
     User,
 )
@@ -120,6 +123,51 @@ def roster_status(
         else None,
         "summary": {"total": len(items), "claimed": claimed, "unclaimed": len(items) - claimed},
         "items": items,
+    }
+
+
+@router.get("/invites/{code}")
+def invite_preview(code: str, session: Session = Depends(get_session)):
+    """Public invite summary for the claim page.
+
+    Only render-safe fields are exposed — never the contact itself, which is
+    the claim page's proof of identity.
+    """
+    record = session.exec(select(MemberRecord).where(MemberRecord.invite_code == code)).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Invite code not found")
+    assoc = session.get(Association, record.association_id)
+    if assoc is None:
+        raise HTTPException(status_code=404, detail="Association not found")
+    # The active cycle and whether this record has already paid it.
+    cycle = session.exec(
+        select(DuesCycle)
+        .where(DuesCycle.association_id == assoc.id, DuesCycle.status == CycleStatus.active)
+        .order_by(DuesCycle.created_at.desc())
+    ).first()
+    paid = None
+    if cycle:
+        p = session.exec(
+            select(Payment).where(
+                Payment.dues_cycle_id == cycle.id,
+                Payment.member_record_id == record.id,
+                Payment.status == PaymentStatus.success,
+            )
+        ).first()
+        paid = str(p.amount) if p else None
+    return {
+        "name": record.name,
+        "matric_number": record.matric_number,
+        "invite_status": record.invite_status.value,
+        "created_at": record.created_at.isoformat(),
+        "association": {
+            "id": str(assoc.id),
+            "name": assoc.name,
+            "institution": assoc.institution,
+            "department_or_faculty": assoc.department_or_faculty,
+        },
+        "cycle": {"id": str(cycle.id), "title": cycle.title, "amount": str(cycle.amount)} if cycle else None,
+        "paid_amount": paid,
     }
 
 

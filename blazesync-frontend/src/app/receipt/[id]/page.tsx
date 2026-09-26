@@ -10,6 +10,7 @@ import { useToast } from "@/components/ui/Toast";
 import { channelLabel, fmtDateTime, naira, toKobo } from "@/lib/format";
 import { canonicalString, groupHash, recomputeHash } from "@/lib/receipt-hash";
 import { useStore } from "@/lib/store";
+import type { Receipt } from "@/lib/types";
 
 type Check = "checking" | "match" | "mismatch";
 
@@ -19,9 +20,18 @@ type Check = "checking" | "match" | "mismatch";
  */
 export default function ReceiptPage({ params }: PageProps<"/receipt/[id]">) {
   const { id } = use(params);
-  const { ready, db, session } = useStore();
+  const { ready, db, session, mode, loadReceipt } = useStore();
   const toast = useToast();
-  const receipt = db?.receipts.find((r) => r.id === id) ?? null;
+  const [liveReceipt, setLiveReceipt] = useState<Receipt | null>(null);
+  useEffect(() => {
+    if (mode !== "live") return;
+    let live = true;
+    loadReceipt(id).then((r) => live && setLiveReceipt(r));
+    return () => {
+      live = false;
+    };
+  }, [id, mode, loadReceipt]);
+  const receipt = (mode === "live" ? liveReceipt : db?.receipts.find((r) => r.id === id)) ?? null;
   const [check, setCheck] = useState<Check>("checking");
   const [tryAmount, setTryAmount] = useState("");
   const [tryHash, setTryHash] = useState<string | null>(null);
@@ -59,7 +69,7 @@ export default function ReceiptPage({ params }: PageProps<"/receipt/[id]">) {
     );
   }
 
-  if (!receipt || !db) {
+  if (!receipt || (mode === "demo" && !db)) {
     return (
       <Shell>
         <EmptyState icon={<SearchX className="size-5" />} title="We can't find this receipt" action={<ButtonLink href="/">Go to BlazeSync</ButtonLink>}>
@@ -69,10 +79,10 @@ export default function ReceiptPage({ params }: PageProps<"/receipt/[id]">) {
     );
   }
 
-  const record = db.roster.find((r) => r.id === receipt.payerId);
+  const record = db ? db.roster.find((r) => r.id === receipt.payerId) : null;
   const isMe = !!session && record?.userId === session.userId;
-  const entry = db.ledger.find((l) => l.paymentId === receipt.paymentId);
-  const payment = db.payments.find((p) => p.id === receipt.paymentId);
+  const entry = db?.ledger.find((l) => l.paymentId === receipt.paymentId) ?? null;
+  const payment = db?.payments.find((p) => p.id === receipt.paymentId) ?? null;
   const home = session ? (session.role === "exco" ? "/exco" : "/member") : "/";
 
   const share = async () => {
@@ -109,12 +119,12 @@ export default function ReceiptPage({ params }: PageProps<"/receipt/[id]">) {
 
         <dl className="divide-y divide-rule px-6 text-sm sm:px-8">
           {[
-            ["Paid by", `${receipt.payerName}${record ? `, ${record.matric}` : ""}`],
-            ["Paid to", receipt.associationName],
+            ["Paid by", `${receipt.payerName || "A member"}${record ? `, ${record.matric}` : ""}`],
+            ["Paid to", receipt.associationName || "Your association"],
             ["When", fmtDateTime(receipt.issuedAt)],
             ["Paid with", channelLabel[receipt.channel]],
             ["Fee", receipt.fee ? naira(receipt.fee) : "None"],
-            ...(payment?.recordedBy ? [["Recorded by", db.users.find((u) => u.id === payment.recordedBy)?.name ?? "An exco"]] : []),
+            ...(payment?.recordedBy && db ? [["Recorded by", db.users.find((u) => u.id === payment.recordedBy)?.name ?? "An exco"]] : []),
             ["Reference", receipt.txRef],
           ].map(([k, v]) => (
             <div key={k} className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3">

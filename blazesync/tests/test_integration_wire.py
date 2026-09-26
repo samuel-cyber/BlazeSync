@@ -51,8 +51,6 @@ def test_audit_feed_rejects_non_member(client, treasurer, association):
 
 
 def test_disbursement_wire_has_names(client, treasurer, association):
-    import json as _json
-
     headers = {"Authorization": f"Bearer {treasurer['tokens']['access_token']}"}
     body = {
         "amount": 5000.0,
@@ -68,3 +66,46 @@ def test_disbursement_wire_has_names(client, treasurer, association):
     assert d["requested_by_name"] == "Treasurer Test"
     assert d["approval_threshold"] == 2
     assert d["status"] == "pending"
+
+
+def test_invite_preview_public(client, treasurer, association):
+    headers = {"Authorization": f"Bearer {treasurer['tokens']['access_token']}"}
+    import csv as _csv
+    import io as _io
+
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["name", "email"])
+    w.writerow(["Ada Obi", "ada@example.com"])
+    buf.seek(0)
+    up = client.post(
+        f"/api/v1/associations/{association['id']}/roster/upload",
+        files={"file": ("roster.csv", buf.getvalue().encode(), "text/csv")},
+        headers=headers,
+    )
+    assert up.status_code == 200, up.text
+    code = up.json()["invites"][0]["invite_code"]
+    r = client.get(f"/api/v1/invites/{code}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Ada Obi"
+    assert body["association"]["id"] == association["id"]
+    assert "email" not in body and "phone" not in body
+
+
+def test_patch_association_threshold(client, treasurer, association):
+    headers = {"Authorization": f"Bearer {treasurer['tokens']['access_token']}"}
+    r = client.patch(
+        f"/api/v1/associations/{association['id']}",
+        json={"approval_threshold": 3},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["approval_threshold"] == 3
+    # Below the two-signature floor is refused.
+    r2 = client.patch(
+        f"/api/v1/associations/{association['id']}",
+        json={"approval_threshold": 1},
+        headers=headers,
+    )
+    assert r2.status_code == 422

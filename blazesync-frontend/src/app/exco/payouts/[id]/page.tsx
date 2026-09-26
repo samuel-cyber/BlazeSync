@@ -13,7 +13,7 @@ import { selectUser, useDb } from "@/lib/store";
 
 export default function PayoutDetail({ params }: PageProps<"/exco/payouts/[id]">) {
   const { id } = use(params);
-  const { db, session, decidePayout } = useDb();
+  const { db, session, decidePayout, mode: dataMode } = useDb();
   const toast = useToast();
   const [mode, setMode] = useState<"approve" | "reject" | null>(null);
   const [pin, setPin] = useState("");
@@ -48,8 +48,12 @@ export default function PayoutDetail({ params }: PageProps<"/exco/payouts/[id]">
   };
 
   const decide = async () => {
-    if (mode === "approve" && !/^\d{4}$/.test(pin)) {
+    if (mode === "approve" && dataMode === "demo" && !/^\d{4}$/.test(pin)) {
       setErr("Enter your 4-digit BlazeSync PIN to sign.");
+      return;
+    }
+    if (mode === "reject" && dataMode === "live" && pin.length < 8) {
+      setErr("Enter your account password to confirm the rejection.");
       return;
     }
     if (mode === "reject" && note.trim().length < 5) {
@@ -57,7 +61,7 @@ export default function PayoutDetail({ params }: PageProps<"/exco/payouts/[id]">
       return;
     }
     setBusy(true);
-    const r = await decidePayout(d.id, mode!, note.trim() || null);
+    const r = await decidePayout(d.id, mode!, note.trim() || null, mode === "reject" && dataMode === "live" ? pin : undefined);
     setBusy(false);
     if (!r.ok) {
       setErr(
@@ -236,9 +240,16 @@ export default function PayoutDetail({ params }: PageProps<"/exco/payouts/[id]">
               </Field>
             </>
           ) : (
-            <Field label="Why are you rejecting it?" error={err} hint={`${firstName(name(d.requestedBy))} sees this and can ask again with changes.`}>
-              {(a) => <Textarea {...a} value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="The quote is double last year's. Get a second one." />}
-            </Field>
+            <div className="space-y-4">
+              <Field label="Why are you rejecting it?" error={err} hint={`${firstName(name(d.requestedBy))} sees this and can ask again with changes.`}>
+                {(a) => <Textarea {...a} value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="The quote is double last year's. Get a second one." />}
+              </Field>
+              {dataMode === "live" && (
+                <Field label="Your password" error={err} hint="Re-entering your password confirms the rejection was really you.">
+                  {(a) => <Input {...a} type="password" autoComplete="current-password" value={pin} onChange={(e) => setPin(e.target.value)} />}
+                </Field>
+              )}
+            </div>
           )}
         </div>
       </Dialog>

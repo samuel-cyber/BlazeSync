@@ -270,6 +270,7 @@ def _payment_dict(session: Session, payment: Payment) -> dict:
     return {
         "id": str(payment.id),
         "dues_cycle_id": str(payment.dues_cycle_id),
+        "member_record_id": str(payment.member_record_id),
         "amount": str(payment.amount),
         "paid_via": payment.paid_via.value,
         "status": payment.status.value,
