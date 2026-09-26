@@ -1,0 +1,19 @@
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+starlette==1.6.0
+sqlmodel==0.0.45
+sqlalchemy==2.0.54
+alembic==1.20.0
+psycopg[binary]==3.2.12
+pydantic==2.13.5
+pydantic-settings==2.15.0
+email-validator==2.3.0
+python-multipart==0.0.32
+PyJWT==2.10.1
+bcrypt==5.0.0
+httpx==0.28.1
+openpyxl==3.1.5
+# --- dev / test ---
+pgembed==0.2.0
+ruff==0.16.8
+pytest==9.1.1

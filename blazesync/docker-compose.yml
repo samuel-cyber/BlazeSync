@@ -1,0 +1,29 @@
+# Optional: for contributors with Docker, this provides the same Postgres the
+# app expects. Without Docker, leave DATABASE_URL empty — the app boots an
+# embedded real PostgreSQL via pgserver (see README).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: blazesync
+      POSTGRES_PASSWORD: blazesync
+      POSTGRES_DB: blazesync
+    ports:
+      - "5433:5432"
+    volumes:
+      - blazesync_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blazesync"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional Redis — reserved for the future Celery migration path; the MVP
+  # uses FastAPI BackgroundTasks and does not require it.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+
+volumes:
+  blazesync_pgdata:

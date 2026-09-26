@@ -1,0 +1,1 @@
+"""BlazeSync application package."""

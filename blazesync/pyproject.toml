@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = [
+    "B008",  # FastAPI: Depends(...) in defaults is the framework idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Settings class: mutable defaults are intentional (single instantiated object).
+"app/config.py" = ["RUF012"]
+# SQL strings and trigger definitions read better un-wrapped.
+"migrations/*" = ["E501"]
+# Test literals (CSV fixtures, long URLs) may exceed the line.
+"tests/*" = ["E501"]
+# Demo script: long one-line requests keep the step narrative readable.
+"scripts/*" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,51 @@
+# Render Blueprint — one file spins up the whole BlazeSync stack.
+# Deploy: Render Dashboard → New → Blueprint → point at the blazesync repo.
+services:
+  - type: web
+    name: blazesync-api
+    runtime: python
+    plan: free
+    healthCheckPath: /api/health
+    buildCommand: pip install -r requirements.txt && alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: blazesync-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: AUTO_MIGRATE
+        value: "false" # build command already runs alembic upgrade head
+      - key: RECONCILE_INTERVAL_SECONDS
+        value: "300"
+      # Secrets set once in the Render dashboard (sync: false). Leave empty to
+      # run Ecobank in deterministic mock mode — the full demo works offline.
+      - key: ECOBANK_USER_ID
+        sync: false
+      - key: ECOBANK_PASSWORD
+        sync: false
+      - key: ECOBANK_LAB_KEY
+        sync: false
+      - key: ECOBANK_CLIENT_ID
+        sync: false
+      - key: ECOBANK_AFFILIATE_CODE
+        sync: false
+      - key: ECOBANK_SOURCE_CODE
+        sync: false
+      - key: ECOBANK_BASE_URL
+        sync: false
+      - key: ECOBANK_WEBHOOK_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+databases:
+  - name: blazesync-db
+    plan: free

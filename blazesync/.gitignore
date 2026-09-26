@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+.env.local
+
+# Embedded dev Postgres cluster (pgserver)
+.pgserver/
+
+# Local exports
+*.csv.out
