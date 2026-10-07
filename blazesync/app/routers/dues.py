@@ -32,6 +32,8 @@ class CreateCycleBody(BaseModel):
     title: str = Field(min_length=2, max_length=160)
     amount: float = Field(gt=0)
     deadline: datetime
+    # What the money funds — shown on every receipt for the cycle.
+    expectation_statement: str | None = Field(default=None, max_length=2000)
     # Optional per-level overrides in naira: {"100L": 2000, "300L": 5000}.
     per_level: dict[str, float] | None = None
 
@@ -47,6 +49,7 @@ def create_cycle(
         association_id=assoc_id,
         title=body.title.strip(),
         amount=Decimal(str(body.amount)),
+        expectation_statement=(body.expectation_statement.strip() if body.expectation_statement else None),
         per_level={k: float(v) for k, v in body.per_level.items()} if body.per_level else None,
         deadline=body.deadline,
         created_by=membership.user_id,
@@ -86,6 +89,7 @@ class PatchCycleBody(BaseModel):
     title: str | None = None
     deadline: datetime | None = None
     status: CycleStatus | None = None
+    expectation_statement: str | None = Field(default=None, max_length=2000)
 
 
 @router.patch("/dues-cycles/{cycle_id}")
@@ -110,6 +114,8 @@ def patch_cycle(
         cycle.deadline = body.deadline
     if body.status is not None:
         cycle.status = body.status
+    if body.expectation_statement is not None:
+        cycle.expectation_statement = body.expectation_statement.strip() or None
     session.add(cycle)
     audit(
         session,
@@ -237,6 +243,12 @@ def payment_receipt(
         "receipt_hash": receipt.hash if receipt else None,
         "recomputed_hash": verification.get("recomputed_hash"),
         "verified": verification.get("verified", False),
+        # What the money funds — frozen at payment time on the receipt.
+        "expectation_statement": (
+            receipt.expectation_statement_snapshot
+            if receipt and receipt.expectation_statement_snapshot
+            else cycle.expectation_statement
+        ),
     }
 
 
@@ -264,6 +276,7 @@ def _cycle_dict(cycle: DuesCycle) -> dict:
         "association_id": str(cycle.association_id),
         "title": cycle.title,
         "amount": str(cycle.amount),
+        "expectation_statement": cycle.expectation_statement,
         "per_level": {k: str(v) for k, v in cycle.per_level.items()} if cycle.per_level else None,
         "deadline": cycle.deadline.isoformat(),
         "status": cycle.status.value,
@@ -287,4 +300,9 @@ def _payment_dict(session: Session, payment: Payment) -> dict:
         "ecobank_transaction_ref": payment.ecobank_transaction_ref,
         "timestamp": payment.timestamp.isoformat(),
         "receipt_hash": receipt.hash if receipt else None,
+        "expectation_statement": (
+            receipt.expectation_statement_snapshot
+            if receipt and receipt.expectation_statement_snapshot
+            else payment.dues_cycle.expectation_statement
+        ),
     }

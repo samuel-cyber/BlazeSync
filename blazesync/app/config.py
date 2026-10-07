@@ -70,6 +70,12 @@ class Settings:
     RECONCILE_INTERVAL_SECONDS: int = int(_env("RECONCILE_INTERVAL_SECONDS", "300"))
     AUTO_MIGRATE: bool = _env("AUTO_MIGRATE", "true").lower() == "true"
 
+    # --- Ask BlazeSync (LLM optional; rules fallback always available) ---
+    ASK_LLM_API_KEY: str = _env("ASK_LLM_API_KEY")
+    ASK_LLM_BASE_URL: str = _env("ASK_LLM_BASE_URL", "https://api.openai.com/v1")
+    ASK_LLM_MODEL: str = _env("ASK_LLM_MODEL", "gpt-4o-mini")
+    ASK_LLM_TIMEOUT_SECONDS: float = float(_env("ASK_LLM_TIMEOUT_SECONDS", "20"))
+
     # --- Misc ---
     DEFAULT_APPROVAL_THRESHOLD: int = 2
     LEDGER_PAGE_SIZE: int = int(_env("LEDGER_PAGE_SIZE", "50"))

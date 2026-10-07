@@ -7,6 +7,13 @@
  * This file is the only place mock data lives. When the FastAPI backend is
  * ready, the store swaps these for real responses (see docs/API-CONTRACT.md).
  */
+/** The Expectation Statement shown on receipts for each seeded cycle (spec 2). */
+const DEMO_STATEMENTS = new Map<string, string | null>([
+  ["c_cssa_2627_1", "Funds the departmental freshers' welcome pack, tutorial folders and the inter-level football tournament."],
+  ["c_cssa_2526_2", "Funded the 2025/26 second-semester project printing support and departmental welfare."],
+  ["c_fssa_2627_1", "Funds the faculty week registration subsidies and inter-departmental sports gear."],
+  ["c_fssa_2526_2", "Funded the faculty week welfare packs and transport grants."],
+]);
 import { issueHash } from "../receipt-hash";
 import type {
   Association,
@@ -246,6 +253,7 @@ export function createSeed(now: number): DbState {
       name,
       matric: `${LEVEL_YEAR[level]}0805${serial}`,
       level,
+      virtualAccountRef: null,
       email: known ? named[known].email : `${slug(name)}@live.unilag.edu.ng`,
       phone: known ? named[known].phone : `+23480${String(30000000 + i * 7919).slice(0, 8)}`,
       userId,
@@ -273,6 +281,7 @@ export function createSeed(now: number): DbState {
       id: `m_fssa_${i + 1}`,
       associationId: "a_fssa",
       name,
+      virtualAccountRef: null,
       matric: `${LEVEL_YEAR[level]}08${String(10 + (i % 6)).padStart(2, "0")}${String(100 + i * 7).slice(-3)}`,
       level,
       email: known ? known.email : `${slug(name)}@live.unilag.edu.ng`,
@@ -288,6 +297,7 @@ export function createSeed(now: number): DbState {
     {
       id: "c_cssa_2627_1",
       associationId: "a_cssa",
+      expectationStatement: "Funds the departmental freshers' welcome pack, tutorial folders and the inter-level football tournament.",
       title: "2026/27 first semester dues",
       amount: 200_000,
       perLevel: { "100L": 300_000 },
@@ -299,6 +309,7 @@ export function createSeed(now: number): DbState {
     {
       id: "c_cssa_2526_2",
       associationId: "a_cssa",
+      expectationStatement: "Funded the 2025/26 second-semester project printing support and departmental welfare.",
       title: "2025/26 second semester dues",
       amount: 200_000,
       perLevel: null,
@@ -310,6 +321,7 @@ export function createSeed(now: number): DbState {
     {
       id: "c_fssa_2627_1",
       associationId: "a_fssa",
+      expectationStatement: "Funds the faculty week registration subsidies and inter-departmental sports gear.",
       title: "2026/27 faculty dues",
       amount: 150_000,
       perLevel: null,
@@ -321,6 +333,7 @@ export function createSeed(now: number): DbState {
     {
       id: "c_fssa_2526_2",
       associationId: "a_fssa",
+      expectationStatement: "Funded the faculty week welfare packs and transport grants.",
       title: "2025/26 second semester faculty dues",
       amount: 150_000,
       perLevel: null,
@@ -361,6 +374,7 @@ export function createSeed(now: number): DbState {
       txRef: ref,
       issuedAt,
       hash: issueHash({ payerId, amount, issuedAt, associationId: m.associationId, txRef: ref }),
+      expectationStatement: cycleTitle(cycleId) ? DEMO_STATEMENTS.get(cycleId) ?? null : null,
     });
     drafts.push({
       id: `l_${drafts.length + 1}`,

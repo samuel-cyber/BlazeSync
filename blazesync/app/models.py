@@ -16,7 +16,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, JSON, Numeric, String, UniqueConstraint
+from sqlalchemy import Column, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
@@ -153,6 +153,12 @@ class MemberRecord(SQLModel, table=True):
     # Academic level used for per-level dues pricing ("100L"…"500L").
     level: str = Field(default="300L", sa_column=Column(String(8), nullable=False, server_default="300L"))
     user_id: uuid.UUID | None = Field(default=None, foreign_key="user.id", index=True)
+    # Set when roster provisioning issues the member's Ecobank virtual account;
+    # credits landing in it are attributable to this member without manual matching.
+    virtual_account_ref: str | None = Field(
+        default=None,
+        sa_column=Column(String(64), unique=True, index=True, nullable=True),
+    )
     invite_code: str = Field(unique=True, index=True)
     invite_status: InviteStatus = Field(
         default=InviteStatus.pending,
@@ -176,6 +182,10 @@ class DuesCycle(SQLModel, table=True):
     association_id: uuid.UUID = Field(foreign_key="association.id", index=True)
     title: str
     amount: float = Field(sa_column=Column(Numeric(18, 2), nullable=False))
+    # What the money funds — shown on every receipt and the transparency surface.
+    expectation_statement: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
     # Optional per-level overrides: {"100L": 2000, "300L": 5000}. When absent
     # every member pays the flat amount.
     per_level: dict | None = Field(default=None, sa_column=Column(JSON(), nullable=True))
@@ -230,6 +240,11 @@ class Receipt(SQLModel, table=True):
     payment_id: uuid.UUID = Field(foreign_key="payment.id", index=True)
     # Deterministic hash of payer_id + amount + timestamp + association_id + transaction_ref
     hash: str = Field(index=True)
+    # The cycle's expectation statement frozen at payment time, so the receipt
+    # keeps proving what the money was owed for even if the cycle is edited later.
+    expectation_statement_snapshot: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
     generated_at: datetime = Field(default_factory=utcnow)
 
     payment: Payment = Relationship(back_populates="receipts")

@@ -286,13 +286,13 @@ export const api = {
   },
 
   // ---------------- dues + payments
-  createCycle(assocId: string, input: { title: string; amount: number; deadline: string; per_level?: Record<string, number> }): Promise<ApiCycle> {
+  createCycle(assocId: string, input: { title: string; amount: number; deadline: string; expectation_statement?: string | null; per_level?: Record<string, number> }): Promise<ApiCycle> {
     return api.request(`/api/v1/associations/${assocId}/dues-cycles`, { method: "POST", body: input });
   },
   cycles(assocId: string): Promise<{ items: ApiCycle[] }> {
     return api.request(`/api/v1/associations/${assocId}/dues-cycles`);
   },
-  patchCycle(cycleId: string, patch: { title?: string; deadline?: string; status?: "active" | "closed" }): Promise<ApiCycle> {
+  patchCycle(cycleId: string, patch: { title?: string; deadline?: string; status?: "active" | "closed"; expectation_statement?: string | null }): Promise<ApiCycle> {
     return api.request(`/api/v1/dues-cycles/${cycleId}`, { method: "PATCH", body: patch });
   },
   pay(cycleId: string, paid_via: string, idempotency_key: string): Promise<ApiPayment> {
@@ -303,6 +303,12 @@ export const api = {
   },
   myPayments(): Promise<{ items: ApiPayment[] }> {
     return api.request("/api/v1/users/me/payments");
+  },
+  askQuestion(assocId: string, question: string): Promise<{ answer: string; grounded_via: string }> {
+    return api.request(`/api/v1/associations/${assocId}/ask`, { method: "POST", body: { question } });
+  },
+  provisionAccounts(assocId: string): Promise<{ ok: boolean; issued: number; skipped_previously_provisioned: number; failed: number; failed_ids?: string[]; total_on_roster: number }> {
+    return api.request(`/api/v1/associations/${assocId}/roster/provision-accounts`, { method: "POST", body: {} });
   },
 
   // ---------------- ledger
@@ -350,6 +356,8 @@ export interface ApiCycle {
   association_id: string;
   title: string;
   amount: string;
+  /** What the money funds — shown on every receipt. */
+  expectation_statement: string | null;
   per_level: Record<string, string> | null;
   deadline: string;
   status: "active" | "closed";
@@ -366,6 +374,7 @@ export interface ApiPayment {
   ecobank_transaction_ref: string | null;
   timestamp: string;
   receipt_hash: string | null;
+  expectation_statement: string | null;
 }
 
 export interface ApiReceipt {
@@ -378,6 +387,8 @@ export interface ApiReceipt {
   receipt_hash: string | null;
   recomputed_hash: string | null;
   verified: boolean;
+  /** What the money funds, as written on the payer's receipt. */
+  expectation_statement: string | null;
 }
 
 export interface ApiDisbursement {

@@ -80,6 +80,25 @@ async def upload_roster(
     }
 
 
+@router.post("/associations/{assoc_id}/roster/provision-accounts")
+def provision_accounts(
+    assoc_id: uuid.UUID,
+    membership=Depends(require_role(Role.treasurer)),
+    session: Session = Depends(get_session),
+):
+    """Issue an Ecobank virtual account per roster member (spec: upload → provision).
+
+    Idempotent: already-provisioned members are skipped, so re-running after a
+    partial batch finishes the job. In mock mode every member receives a
+    deterministic demo account number instantly.
+    """
+    result = roster_service.provision_accounts(
+        session, assoc_id, actor_id=membership.user_id
+    )
+    session.commit()
+    return {"ok": True, **result}
+
+
 @router.post("/associations/{assoc_id}/roster/send-invites")
 def send_invites(
     assoc_id: uuid.UUID,

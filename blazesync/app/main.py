@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .config import settings
 from .db import ensure_schema
 from .routers import associations, auth, disbursements, dues, ledger, roster, webhooks
+from .routers import ask as ask_router
 from .routers import audit as audit_router
 
 logging.basicConfig(level=logging.INFO)
@@ -70,6 +71,7 @@ app.include_router(roster.router, prefix="/api/v1")
 app.include_router(dues.router, prefix="/api/v1")
 app.include_router(ledger.router, prefix="/api/v1")
 app.include_router(audit_router.router, prefix="/api/v1")
+app.include_router(ask_router.router, prefix="/api/v1")
 app.include_router(disbursements.router, prefix="/api/v1")
 app.include_router(webhooks.router, prefix="/api/v1")
 

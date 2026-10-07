@@ -4,8 +4,8 @@ One module to change if endpoint details shift. All calls retry with
 exponential backoff (sandbox environments are flaky). When sandbox
 credentials are absent (``settings.ecobank_mock_mode``), the client returns
 deterministic mock responses so the entire product flow — collection,
-account enquiry, local bank payment, notifications — works offline for
-development and demos.
+account enquiry, local bank payment, virtual account issuance, webhook
+notifications — works offline for development and demos.
 """
 
 import hashlib
@@ -46,6 +46,13 @@ class BalanceResult:
 class TransferResult:
     success: bool
     transaction_ref: str | None
+    message: str
+
+
+@dataclass
+class VirtualAccountResult:
+    success: bool
+    account_number: str | None
     message: str
 
 
@@ -229,6 +236,55 @@ class EcobankClient:
         )
 
     # --- mock helpers ----------------------------------------------------------
+
+    def create_virtual_account(
+        self, member_name: str, customer_ref: str, association_id: uuid.UUID
+    ) -> VirtualAccountResult:
+        """Issue a dedicated Ecobank virtual account for one roster member.
+
+        Mock mode: derives a deterministic, collision-free account number from
+        the association + member so demo import scripts stay reproducible.
+        """
+        if settings.ecobank_mock_mode:
+            digest = hashlib.sha256(
+                f"{association_id}:{customer_ref}".encode("utf-8")
+            ).hexdigest()
+            # 0x11 prefix keeps it a valid-looking Nigerian bank account length.
+            account_number = "11" + digest[:8].upper()
+            return VirtualAccountResult(
+                success=True, account_number=account_number, message="mock VA issued"
+            )
+        request_id = hashing.new_request_id()
+        rt = hashing.request_token(request_id, "VIRTUAL_ACCT")
+        payload = {
+            "requestId": request_id,
+            "requestToken": rt,
+            "secureHash": hashing.virtual_account_hash(request_id, rt, member_name, customer_ref),
+            "customerName": member_name,
+            "customerReference": customer_ref,
+            "clientId": settings.ECOBANK_CLIENT_ID,
+            "affiliateCode": settings.ECOBANK_AFFILIATE_CODE,
+            "sourceCode": settings.ECOBANK_SOURCE_CODE,
+        }
+        try:
+            data = self._post_with_retry(
+                f"{settings.ECOBANK_BASE_URL}/api/v1/virtual-accounts", payload
+            )
+        except EcobankError as exc:
+            logger.warning("virtual account issuance failed for %s: %s", customer_ref, exc)
+            return VirtualAccountResult(
+                success=False, account_number=None, message="provider unavailable"
+            )
+        success = str(data.get("responseCode")) == "00" or data.get("status") == "SUCCESS"
+        if not success:
+            logger.warning(
+                "virtual account issuance rejected for %s: %s", customer_ref, data.get("message")
+            )
+        return VirtualAccountResult(
+            success=success,
+            account_number=data.get("accountNumber") or data.get("virtualAccountNo"),
+            message=str(data.get("responseMessage") or data.get("message") or ""),
+        )
 
     def _mock_balance(self, account_ref: str) -> BalanceResult:
         """Deterministic balance derived from the account ref + configured drift.

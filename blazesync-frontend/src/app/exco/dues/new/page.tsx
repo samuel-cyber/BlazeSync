@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Callout, PageHeader, Panel } from "@/components/ui/bits";
-import { Checkbox, Field, Input, MoneyInput, Switch } from "@/components/ui/Field";
+import { Checkbox, Field, Input, MoneyInput, Switch, Textarea } from "@/components/ui/Field";
 import { useToast } from "@/components/ui/Toast";
 import { isPastDay, naira, plural, toKobo } from "@/lib/format";
 import { selectAssociation, selectOpenCycle, useDb } from "@/lib/store";
@@ -23,6 +23,7 @@ export default function NewCycle() {
 
   const [title, setTitle] = useState("2026/27 second semester dues");
   const [amount, setAmount] = useState("2000");
+  const [statement, setStatement] = useState("");
   const [deadline, setDeadline] = useState("");
   const [split, setSplit] = useState(false);
   const [perLevel, setPerLevel] = useState<Record<Level, string>>({ "100L": "3000", "200L": "", "300L": "", "400L": "", "500L": "" });
@@ -47,7 +48,14 @@ export default function NewCycle() {
     if (Object.keys(errs).length) return;
     setBusy(true);
     const pl = split ? Object.fromEntries(LEVELS.filter((l) => perLevel[l]).map((l) => [l, toKobo(perLevel[l])!])) : null;
-    const r = await openCycle({ associationId: assocId, title: title.trim(), amount: base!, perLevel: pl && Object.keys(pl).length ? pl : null, deadline: new Date(`${deadline}T23:59:00+01:00`).toISOString() });
+    const r = await openCycle({
+      associationId: assocId,
+      title: title.trim(),
+      amount: base!,
+      perLevel: pl && Object.keys(pl).length ? pl : null,
+      expectationStatement: statement.trim() || null,
+      deadline: new Date(`${deadline}T23:59:00+01:00`).toISOString(),
+    });
     setBusy(false);
     if (!r.ok) {
       setServerError(r.error === "already_open" ? "Another cycle is already open. Close it first, so members only ever owe one thing at a time." : "That didn't save. Try again.");
@@ -84,6 +92,22 @@ export default function NewCycle() {
             {(a) => <Input {...a} type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />}
           </Field>
         </div>
+
+        <Field
+          label="What the money funds (expectation statement)"
+          hint="Printed on every receipt for this cycle — tell members what their money is going to do."
+        >
+          {(a) => (
+            <Textarea
+              {...a}
+              rows={3}
+              maxLength={400}
+              value={statement}
+              onChange={(e) => setStatement(e.target.value)}
+              placeholder="e.g. Funds the departmental freshers' welcome pack, tutorial folders and the inter-level football tournament."
+            />
+          )}
+        </Field>
 
         <Panel className="px-4">
           <Switch checked={split} onChange={setSplit} label="Charge some levels a different amount" hint="For example, freshers pay more because it includes a welcome pack." />

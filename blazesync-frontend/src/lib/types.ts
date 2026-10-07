@@ -76,6 +76,8 @@ export interface MemberRecord {
     claimedAt: ISODate | null;
   };
   source: "roster" | "join_code";
+  /** The member's Ecobank virtual account, set when exco runs provisioning. */
+  virtualAccountRef: string | null;
 }
 
 export interface DuesCycle {
@@ -83,6 +85,8 @@ export interface DuesCycle {
   associationId: string;
   title: string;
   amount: Kobo;
+  /** What the money funds — printed on every receipt (spec 2). */
+  expectationStatement: string | null;
   /** Optional per-level amounts; falls back to `amount`. */
   perLevel: Partial<Record<Level, Kobo>> | null;
   deadline: ISODate;
@@ -154,6 +158,8 @@ export interface Receipt {
   issuedAt: ISODate;
   /** sha256(payerId|amount|issuedAt|associationId|txRef), hex. */
   hash: string;
+  /** What the money funds, frozen at payment time on the receipt. */
+  expectationStatement: string | null;
 }
 
 export type DisbursementStatus =

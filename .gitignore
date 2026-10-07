@@ -1,0 +1,19 @@
+# Plain-text extract used for the audit; not part of the repo.
+/tmp_prd.txt
+/tmp_spec.txt
+
+# Repo-local companions to the untracked PDFs
+/blazesync-prd-notes.md
+/blazesync-techspec-notes.md
+blazesync-spec-notes.md
+
+# Local run logs
+/blazesync-api.log
+/blazesync-web.log
+*.log
+
+# Local test/dev databases and tooling scratch
+/.pgtest/
+/.pgserver/
+/scripts/_run_dev.py
+/scripts/_run_tests.py

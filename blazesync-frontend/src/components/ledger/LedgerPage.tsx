@@ -1,18 +1,70 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, FileDown, Search, SearchX } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileDown, Search, SearchX, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
-import { EmptyState, PageHeader, Section, Segmented } from "@/components/ui/bits";
+import { EmptyState, PageHeader, Panel, Section, Segmented } from "@/components/ui/bits";
+import { Button } from "@/components/ui/Button";
 import { ButtonLink } from "@/components/ui/Button";
-import { Select } from "@/components/ui/Field";
+import { Select, Textarea } from "@/components/ui/Field";
+import { useToast } from "@/components/ui/Toast";
 import { fmtDateTime, fmtTime, naira } from "@/lib/format";
-import { selectAssociation, selectLedger, selectOpenCycle, useDb, useNow } from "@/lib/store";
+import { selectAssociation, selectLedger, selectOpenCycle, useDb, useNow, useStore } from "@/lib/store";
 import type { LedgerCategory } from "@/lib/types";
 import { LedgerHead } from "./LedgerHead";
 import { LedgerFeed } from "./LedgerFeed";
 
 type Period = "all" | "cycle" | "7" | "30";
 type Direction = "all" | "in" | "out";
+
+/** Ask BlazeSync: a read-only question over the association's real ledger. */
+function AskBlazeSync() {
+  const { ask } = useStore();
+  const toast = useToast();
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ answer: string; groundedVia: string } | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!q.trim() || busy) return;
+    setBusy(true);
+    const r = await ask(q);
+    setBusy(false);
+    if (!r.ok) {
+      toast(r.error === "rate_limited" ? "Too many questions just now — try again in a moment." : "Couldn't answer that. Try again.", "danger");
+      return;
+    }
+    setResult(r.value);
+  };
+
+  return (
+    <Panel className="px-4">
+      <Section title="Ask BlazeSync" aside={<span className="text-xs text-ink-3">Read-only</span>}>
+        <form onSubmit={submit} className="space-y-3">
+          <Textarea
+            rows={2}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="e.g. How much did 300L pay this cycle?"
+            aria-label="Ask a question about the ledger"
+          />
+          <div className="flex items-center gap-3">
+            <Button type="submit" size="sm" busy={busy} disabled={!q.trim()}>
+              <Sparkles aria-hidden className="size-4" /> Ask
+            </Button>
+            <p className="text-xs text-ink-3">Answers come only from this association&apos;s real ledger — BlazeSync says so when it doesn&apos;t know.</p>
+          </div>
+        </form>
+        {result && (
+          <div className="mt-3 rounded-md bg-sunken px-4 py-3 text-sm" aria-live="polite">
+            <p>{result.answer}</p>
+            <p className="mt-1 text-xs text-ink-3">{result.groundedVia === "llm" ? "Answered from the ledger by the AI, read-only." : result.groundedVia === "demo" ? "Demo answer — limited to totals." : "Answered with exact ledger queries."}</p>
+          </div>
+        )}
+      </Section>
+    </Panel>
+  );
+}
 
 /** The full statement, the same for exco and members; one filter row scopes everything below it. */
 export function LedgerPage({ audience }: { audience: "exco" | "member" }) {
@@ -62,6 +114,8 @@ export function LedgerPage({ audience }: { audience: "exco" | "member" }) {
       />
 
       <LedgerHead associationId={assocId} audience={audience} />
+
+      <AskBlazeSync />
 
       <section aria-label="Statement" className="space-y-4">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center">

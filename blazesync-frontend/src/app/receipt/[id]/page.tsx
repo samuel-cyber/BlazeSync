@@ -134,6 +134,14 @@ export default function ReceiptPage({ params }: PageProps<"/receipt/[id]">) {
           ))}
         </dl>
 
+        {receipt.expectationStatement && (
+          <div className="border-t border-dashed border-edge/60 px-6 py-5 sm:px-8">
+            <p className="text-sm font-semibold">What this money funds</p>
+            <p className="mt-1 text-ink-2">{receipt.expectationStatement}</p>
+            <p className="mt-1 text-xs text-ink-3">Frozen at payment time — it can&apos;t be changed without breaking the fingerprint.</p>
+          </div>
+        )}
+
         <div className="space-y-4 border-t border-dashed border-edge/60 bg-paper/60 px-6 py-6 sm:px-8">
           <div aria-live="polite">
             {check === "checking" && (

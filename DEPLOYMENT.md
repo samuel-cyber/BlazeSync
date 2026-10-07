@@ -28,8 +28,8 @@ The frontend decides mode automatically:
 1. **A PostgreSQL database** — Railway, Neon, Supabase, or a managed instance.
    (Local dev uses an embedded Postgres automatically; production requires
    `DATABASE_URL` or the app refuses to boot.)
-2. **Ecobank sandbox credentials** — request access to the *Ecobank Unified
-   API* developer sandbox. You'll receive:
+2. **Ecobank sandbox credentials** — see **§7** below for the step-by-step of
+   getting them; you'll receive:
    - `ECOBANK_USER_ID`, `ECOBANK_PASSWORD`, `ECOBANK_LAB_KEY`,
      `ECOBANK_CLIENT_ID`, `ECOBANK_AFFILIATE_CODE`, `ECOBANK_SOURCE_CODE`,
      `ECOBANK_WEBHOOK_SECRET`
@@ -41,6 +41,10 @@ The frontend decides mode automatically:
 3. **A Vercel account** (or any Node host) for the frontend.
 4. **A domain** (optional but recommended) — needed for Ecobank webhooks to
    reach you in production.
+5. **(Optional) An LLM API key** for Ask BlazeSync — any OpenAI-compatible
+   endpoint works (`ASK_LLM_API_KEY`, `ASK_LLM_BASE_URL`, `ASK_LLM_MODEL`).
+   Without it the Ask endpoint still works: it falls back to deterministic
+   ledger queries. No key is needed for anything else.
 
 ---
 
@@ -79,6 +83,12 @@ ACCESS_TOKEN_MINUTES=15
 REFRESH_TOKEN_DAYS=7
 INVITE_EXPIRY_DAYS=14
 AUTO_MIGRATE=true
+
+# Ask BlazeSync — optional; empty key = deterministic rules fallback
+ASK_LLM_API_KEY=
+ASK_LLM_BASE_URL=https://api.openai.com/v1
+ASK_LLM_MODEL=gpt-4o-mini
+ASK_LLM_TIMEOUT_SECONDS=20
 ```
 
 **Notes**
@@ -109,7 +119,7 @@ py -3 scripts/_run_dev.py 8000          # embedded Postgres + API in one process
 DEV_ORIGIN=http://localhost:3000 py -3 scripts/_run_dev.py 8000   # if frontend runs on :3000
 ```
 
-Tests: `py -3 scripts/_run_tests.py -q` (embedded Postgres, 35 tests).
+Tests: `py -3 scripts/_run_tests.py -q` (embedded Postgres, 45 tests).
 
 ---
 
@@ -128,7 +138,9 @@ Tests: `py -3 scripts/_run_tests.py -q` (embedded Postgres, 35 tests).
 
 Verify the flow: sign up → create association → link bank account (mock OTP:
 any 6 digits except `000000`) → upload roster (sample file button) → open a
-dues cycle → pay as a member → watch the ledger update live.
+dues cycle (with an expectation statement — it prints on the receipt) → pay as
+a member → watch the ledger update live → ask the ledger a question in the
+"Ask BlazeSync" box.
 
 ---
 
@@ -142,6 +154,10 @@ dues cycle → pay as a member → watch the ledger update live.
 - [ ] Full flow works: setup → roster → cycle → pay → receipt verifies
 - [ ] Payout flow: request → second signatory approves → processing → completed
 - [ ] WebSocket live updates work (second browser tab sees payments instantly)
+- [ ] Roster provisioning works: `POST .../roster/provision-accounts` issues
+      mock VAs and re-running skips the already-provisioned
+- [ ] Ask BlazeSync answers from real data (LLM or rules fallback; check
+      `grounded_via` in the response)
 - [ ] JWT_SECRET is a fresh random value; ENVIRONMENT=production
 
 **Production (real Ecobank):**
@@ -151,6 +167,12 @@ dues cycle → pay as a member → watch the ledger update live.
 - [ ] Webhook URL registered with Ecobank:
       `https://api.yourdomain.com/api/v1/webhooks/ecobank/notification`
       with the webhook secret set
+- [ ] Provision real VAs for the roster, then test the full happy path:
+      transfer a small amount into one member's VA → webhook fires → payment
+      auto-attributed → ledger updates live → receipt shows the expectation
+      statement and verifies
+- [ ] Ask BlazeSync: confirm the LLM path is grounded (`grounded_via: "llm"`)
+      and refuses questions outside the data
 - [ ] Test with a small real disbursement you control
 - [ ] Database backups enabled (managed Postgres usually does this)
 - [ ] Monitor: application logs + `audit_log` table (every sensitive action
@@ -163,15 +185,125 @@ dues cycle → pay as a member → watch the ledger update live.
    the phone registered on that account — BlazeSync never asks for banking
    PINs/passwords).
 3. Uploads the member roster CSV (name, matric, level, email/phone).
-4. Invites co-signatories; sets the signature rule (min 2 — a payout can never
+4. **Provisions virtual accounts** — one per roster member (see §6.1 below).
+5. Invites co-signatories; sets the signature rule (min 2 — a payout can never
    move on one person's approval alone).
-5. Opens a dues cycle (flat amount, or per-level pricing).
-6. Members claim their invite links (the contact in the claim form must match
-   what the roster has) and pay; every payment gets a tamper-evident receipt.
+6. Opens a dues cycle (flat amount, or per-level pricing) **and writes the
+   expectation statement** — the plain-language promise of what the money funds,
+   printed on every receipt.
+7. Members claim their invite links (the contact in the claim form must match
+   what the roster has) and pay; every payment gets a tamper-evident receipt
+   with the expectation statement frozen onto it.
 
 ---
 
-## 6. Where things live (for future maintenance)
+## 6. The spec features, in production terms
+
+### 6.1 Virtual accounts & provisioning
+
+`POST /api/v1/associations/{id}/roster/provision-accounts` issues one Ecobank
+virtual account per roster member. Key properties:
+
+- **Idempotent** — already-provisioned members are skipped, so it's safe to
+  re-run (e.g. after adding roster rows). Re-upload a CSV with new members,
+  then provision again.
+- **Partial failures don't abort the run** — the response reports
+  `issued` / `skipped_previously_provisioned` / `failed` (with `failed_ids`),
+  and re-running retries only the failures.
+- **Mock mode** provisions deterministic fake accounts (11 + 8 hex digits,
+  derived from the association + member), so the full flow demos without bank
+  credentials.
+- Once provisioned, the member's VA ref shows on the roster, and any credit
+  that lands in it is auto-attributed (see 6.2).
+
+> **Frontend note:** the API client method (`provisionAccounts`) exists, but
+> there's no UI button yet. Trigger provisioning from the API docs UI at
+> `/docs` for now — a "Provision accounts" button on the roster page is an easy
+> follow-up.
+
+### 6.2 Webhook auto-attribution
+
+Ecobank calls `POST /api/v1/webhooks/ecobank/notification` when money lands in
+any provisioned VA. The handler verifies the HMAC signature first, then:
+
+1. Finds the member whose VA was credited (unmatched refs are logged to
+   `audit_log`, never guessed).
+2. Matches them to the association's open dues cycle and records the payment
+   (idempotent by transaction ref — redeliveries are safe).
+3. Writes the ledger entry and pushes a live WebSocket update — the treasurer's
+   screen updates the moment Ecobank confirms.
+
+Register this URL with Ecobank (staging + production):
+`https://api.yourdomain.com/api/v1/webhooks/ecobank/notification`
+
+### 6.3 Expectation statements
+
+Set when a cycle is created (or patched later) as `expectation_statement`. It's
+snapshotted onto each receipt at payment time, so what the money was owed *for*
+is frozen alongside the cryptographic proof — editing the cycle afterwards
+can't rewrite old receipts. Receipts display it as "What this money funds".
+
+### 6.4 Ask BlazeSync
+
+`POST /api/v1/associations/{id}/ask` — read-only, available to any member of
+the association. It builds a compact context from the association's real data
+(balance, category totals, active cycle, roster payment status, recent entries)
+and either:
+
+- calls the LLM with a strict system prompt (answer only from the context,
+  say "I don't have that information" rather than guess), or
+- falls back to deterministic ledger queries when `ASK_LLM_API_KEY` is unset.
+
+The response's `grounded_via` field says which path answered (`llm` or
+`rules`). The endpoint can never mutate anything. LLM traffic is outbound-only
+from your server; the key never reaches the browser.
+
+## 7. Getting Ecobank sandbox credentials
+
+Per Ecobank's own [Unified API getting-started guide](https://apimuat-developer.ecobank.com/documentation/getting-started),
+the credentials arrive **by email after you register** — there's no key you
+generate yourself:
+
+1. **Register on the developer portal** — [developer.ecobank.com](https://developer.ecobank.com)
+   → the sandbox-access / Register flow. Fill in your details and submit.
+   (On the newer API-management portal you instead click **Sign In → Continue
+   as Partner → Sign up now**, verify your email with the code they send, and
+   complete the form.)
+2. **Wait for the confirmation email.** It contains exactly the pieces
+   BlazeSync needs:
+   | Email item | BlazeSync env var |
+   |---|---|
+   | **UserID** | `ECOBANK_USER_ID` — used for token generation |
+   | **Password** | `ECOBANK_PASSWORD` — used for token generation |
+   | **Lab key** | `ECOBANK_LAB_KEY` — used to compute the `secureHash` |
+   | Documentation link + test-case file | (for the go-live request later) |
+   Keep the registration username/password safe — they're what you log in with
+   when requesting go-live.
+3. **Subscribe to the services you use.** On the portal (or the newer "Sign in
+   → Products" flow), subscribe to the products BlazeSync touches: token
+   generation / authentication, **Collection & Payments**, **Account Services
+   (Account Enquiry)**, **Local Bank Payments**, and virtual accounts if
+   offered. Each subscription has primary/secondary keys — if the portal
+   issues per-product keys, put the relevant one into `ECOBANK_CLIENT_ID`,
+   and set `ECOBANK_AFFILIATE_CODE` / `ECOBANK_SOURCE_CODE` to the values the
+   sandbox docs/examples use.
+4. **Don't change sandbox request bodies** — for sandbox testing Ecobank
+   expects the predefined test data; only auth headers/origin vary.
+   BlazeSync already sends `Origin: developer.ecobank.com` (the
+   `ECOBANK_ORIGIN` var).
+5. **Test the two primitives in isolation first** (Token generation and the
+   Hashing Service) before wiring flows — BlazeSync's client already does
+   token-caching + retry/backoff, so once those two work the rest follows.
+6. **Go-live is a separate request** — complete the test-case document they
+   emailed, re-login on the portal, and submit it with basic KYC. Production
+   credentials follow after their review.
+
+If you can't get registered quickly (deadline!), skip this entirely:
+**leaving every `ECOBANK_*` variable blank runs the whole app in mock bank
+mode** — real flows, real pages, deterministic fake money. Ideal for the
+demo/judging; swap in sandbox creds whenever the email arrives.
+
+## 8. Where things live (for future maintenance)
 
 | Area | Path |
 |---|---|
@@ -181,5 +313,10 @@ dues cycle → pay as a member → watch the ledger update live.
 | Backend routers | `blazesync/app/routers/` |
 | Bank client (mock-aware) | `blazesync/app/ecobank/client.py` |
 | Receipt hash (tamper evidence) | `blazesync/app/services/receipts.py` ↔ `blazesync-frontend/src/lib/receipt-hash.ts` |
+| Virtual account provisioning | `blazesync/app/services/roster.py` (`provision_accounts`) |
+| VA issuance (bank side) | `blazesync/app/ecobank/client.py` (`create_virtual_account`) |
+| Webhook credit attribution | `blazesync/app/routers/webhooks.py` |
+| Ask BlazeSync | `blazesync/app/services/ask.py` + `blazesync/app/routers/ask.py` |
 | Migrations | `blazesync/migrations/versions/` |
 | Integration tests | `blazesync/tests/test_integration_wire.py` |
+| Spec-gap tests | `blazesync/tests/test_spec_gaps.py` |

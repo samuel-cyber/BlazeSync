@@ -19,6 +19,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { ApiError, api, clearTokens, hasTokens, type ApiAssociation, type ApiDisbursement, type MembershipsResponse } from "./api";
 import { useLedgerSocket, type LiveEvent } from "./live";
 import { issueHash } from "./receipt-hash";
+import { naira } from "./format";
 import { cashInHandFor, createSeed, DEMO, inviteCode, txRef, type DbState } from "./mock/seed";
 import type {
   Association,
@@ -125,12 +126,13 @@ function toAssociation(w: ApiAssociation): Association {
   };
 }
 
-function toCycle(w: { id: string; association_id: string; title: string; amount: string; per_level: Record<string, string> | null; deadline: string; status: "active" | "closed"; created_at: string }): DuesCycle {
+function toCycle(w: { id: string; association_id: string; title: string; amount: string; expectation_statement: string | null; per_level: Record<string, string> | null; deadline: string; status: "active" | "closed"; created_at: string }): DuesCycle {
   return {
     id: w.id,
     associationId: w.association_id,
     title: w.title,
     amount: kobo(w.amount),
+    expectationStatement: w.expectation_statement,
     perLevel: w.per_level ? Object.fromEntries(Object.entries(w.per_level).map(([k, v]) => [k, kobo(v)])) : null,
     deadline: w.deadline,
     openedAt: w.created_at,
@@ -139,7 +141,7 @@ function toCycle(w: { id: string; association_id: string; title: string; amount:
   };
 }
 
-function toPayment(w: { id: string; dues_cycle_id: string; amount: string; paid_via: string; status: string; ecobank_transaction_ref: string | null; timestamp: string; receipt_hash: string | null }): Payment {
+function toPayment(w: { id: string; dues_cycle_id: string; amount: string; paid_via: string; status: string; ecobank_transaction_ref: string | null; timestamp: string; receipt_hash: string | null; expectation_statement?: string | null }): Payment {
   return {
     id: w.id,
     associationId: "",
@@ -215,7 +217,7 @@ function toLedgerEntry(w: { id: string; type: string; amount: string; reason_or_
   };
 }
 
-function toReceipt(w: { payment_id: string; amount: string; paid_via: string; status: string; ecobank_transaction_ref: string | null; timestamp: string; receipt_hash: string | null }): Receipt {
+function toReceipt(w: { payment_id: string; amount: string; paid_via: string; status: string; ecobank_transaction_ref: string | null; timestamp: string; receipt_hash: string | null; expectation_statement?: string | null }): Receipt {
   const amount = kobo(w.amount);
   return {
     id: w.payment_id,
@@ -231,16 +233,17 @@ function toReceipt(w: { payment_id: string; amount: string; paid_via: string; st
     txRef: w.ecobank_transaction_ref ?? w.payment_id,
     issuedAt: w.timestamp,
     hash: w.receipt_hash ?? "",
+    expectationStatement: w.expectation_statement ?? null,
   };
 }
 
-function toRosterItem(w: { id: string; name: string; matric_number: string | null; email: string; phone: string | null; claimed: boolean; claimed_by: string | null; invite_status: string; paid: boolean | null }): MemberRecord {
+function toRosterItem(w: { id: string; name: string; matric_number: string | null; email: string; phone: string | null; claimed: boolean; claimed_by: string | null; level?: string; virtual_account_ref?: string | null; invite_status: string; paid: boolean | null }): MemberRecord {
   return {
     id: w.id,
     associationId: "",
     name: w.name,
     matric: w.matric_number ?? "",
-    level: "300L",
+    level: (w.level || "300L") as MemberRecord["level"],
     email: w.email,
     phone: w.phone ?? "",
     userId: w.claimed ? w.claimed_by : null,
@@ -251,6 +254,7 @@ function toRosterItem(w: { id: string; name: string; matric_number: string | nul
       claimedAt: null,
     },
     source: "roster",
+    virtualAccountRef: w.virtual_account_ref ?? null,
   };
 }
 
@@ -431,6 +435,7 @@ function useStoreValue() {
       txRef: p.ids.ref,
       issuedAt: p.at,
       hash: issueHash({ payerId: p.record.id, amount, issuedAt: p.at, associationId: assoc.id, txRef: p.ids.ref }),
+      expectationStatement: p.cycle.expectationStatement,
     });
     appendLedger(d, {
       id: p.ids.entry,
@@ -810,6 +815,7 @@ function useStoreValue() {
         userId,
         invite: { status: "claimed", code: inviteCode(rnd), sentAt: null, claimedAt: new Date().toISOString() },
         source: "join_code",
+        virtualAccountRef: null,
       });
       audit(draft, input.associationId, userId, "invite_claimed", `${input.name.trim()} joined with the association code`);
     });
@@ -868,6 +874,7 @@ function useStoreValue() {
           userId: null,
           invite: { status: "not_sent", code: inviteCode(rnd), sentAt: null, claimedAt: null },
           source: "roster",
+          virtualAccountRef: null,
         });
       }
       audit(draft, associationId, session!.userId, "roster_uploaded", `Uploaded ${rows.length} members from ${fileName}`);
@@ -900,13 +907,14 @@ function useStoreValue() {
     return { ok: true, value: recordIds.length };
   }
 
-  async function openCycle(input: { associationId: string; title: string; amount: number; perLevel: Partial<Record<Level, number>> | null; deadline: string }): Promise<Result<string>> {
+  async function openCycle(input: { associationId: string; title: string; amount: number; perLevel: Partial<Record<Level, number>> | null; expectationStatement: string | null; deadline: string }): Promise<Result<string>> {
     if (modeRef.current === "live") {
       try {
         const c = await api.createCycle(input.associationId, {
           title: input.title,
           amount: input.amount / 100,
           deadline: input.deadline,
+          expectation_statement: input.expectationStatement ?? null,
           ...(input.perLevel ? { per_level: Object.fromEntries(Object.entries(input.perLevel).map(([k, v]) => [k, v / 100])) } : {}),
         });
         await loadAssociation(input.associationId, { silent: true });
@@ -921,10 +929,33 @@ function useStoreValue() {
     if (d.cycles.some((c) => c.associationId === input.associationId && c.status === "open")) return { ok: false, error: "already_open" };
     const id = rid("c");
     update((draft) => {
-      draft.cycles.push({ id, associationId: input.associationId, title: input.title, amount: input.amount, perLevel: input.perLevel, deadline: input.deadline, openedAt: new Date().toISOString(), status: "open", closedAt: null });
+      draft.cycles.push({ id, associationId: input.associationId, title: input.title, amount: input.amount, expectationStatement: input.expectationStatement, perLevel: input.perLevel, deadline: input.deadline, openedAt: new Date().toISOString(), status: "open", closedAt: null });
       audit(draft, input.associationId, session!.userId, "cycle_opened", `Opened ${input.title}`);
     });
     return { ok: true, value: id };
+  }
+
+  /** Ask BlazeSync: read-only question answered from the real ledger. */
+  async function ask(question: string): Promise<Result<{ answer: string; groundedVia: string }>> {
+    const q = question.trim();
+    if (!q) return { ok: false, error: "empty" };
+    const assocId = dbRef.current?.associations[0]?.id ?? session?.associationId;
+    if (!assocId) return { ok: false, error: "no_association" };
+    if (modeRef.current === "live") {
+      try {
+        const r = await api.askQuestion(assocId, q);
+        return { ok: true, value: { answer: r.answer, groundedVia: r.grounded_via } };
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 429) return { ok: false, error: "rate_limited" };
+        return { ok: false, error: "network" };
+      }
+    }
+    const d = dbRef.current!;
+    const ledger = d.ledger.filter((l) => l.associationId === assocId);
+    const inflow = ledger.filter((l) => l.direction === "in").reduce((s, e) => s + e.amount, 0);
+    const outflow = ledger.filter((l) => l.direction === "out").reduce((s, e) => s + e.amount, 0);
+    const answer = `In demo mode I can only give you the basics: total in ${naira(inflow)}, total out ${naira(outflow)}, ${ledger.length} ledger entries. Connect the live backend for full answers.`;
+    return { ok: true, value: { answer, groundedVia: "demo" } };
   }
 
   async function closeCycle(cycleId: string): Promise<Result> {
@@ -1396,6 +1427,7 @@ function useStoreValue() {
     sendInvites,
     openCycle,
     closeCycle,
+    ask,
     extendCycle,
     requestPayout,
     decidePayout,

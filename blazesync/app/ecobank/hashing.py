@@ -100,3 +100,20 @@ def local_transfer_hash(
     return secure_hash(
         request_id, "PURCHASE", rt, receiver_account_no, amount, currency, description
     )
+
+
+def virtual_account_hash(
+    request_id: str,
+    rt: str,
+    customer_name: str,
+    customer_ref: str,
+) -> str:
+    """Virtual Account issuance: ... + requestToken + customerName +
+    customerReference + secretKey.
+
+    The sandbox virtual-account service hashes the account-holder name and
+    our internal reference in that order after the requestToken — verified
+    against the portal's Virtual Account page; adjust here (one place) if
+    the field order shifts in a portal revision.
+    """
+    return secure_hash(request_id, "VIRTUAL_ACCT", rt, customer_name, customer_ref)

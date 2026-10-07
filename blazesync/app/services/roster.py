@@ -136,7 +136,65 @@ def import_roster(
     return created
 
 
-def send_invites(session: Session, association_id: uuid.UUID) -> int:
+def provision_accounts(
+    session: Session,
+    association_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+) -> dict:
+    """Issue an Ecobank virtual account for every roster member lacking one.
+
+    Idempotent and batch-safe: already-provisioned members are skipped, a
+    single member's provider failure doesn't abort the batch, and the audit
+    metadata reports exactly which rows remain unprovisioned for retries.
+    """
+    from .. import audit as audit_service
+    from ..ecobank import client as ecobank_client
+
+    records = session.exec(
+        select(MemberRecord).where(
+            MemberRecord.association_id == association_id,
+        )
+    ).all()
+    issued, skipped, failed = [], [], []
+    for record in records:
+        if record.virtual_account_ref:
+            skipped.append(str(record.id))
+            continue
+    # Only unprovisioned rows are attempted.
+    for record in records:
+        if record.virtual_account_ref:
+            continue
+        result = ecobank_client.create_virtual_account(
+            member_name=record.name,
+            customer_ref=f"{association_id}:{record.id}",
+            association_id=association_id,
+        )
+        if result.success and result.account_number:
+            record.virtual_account_ref = result.account_number
+            session.add(record)
+            issued.append(str(record.id))
+        else:
+            failed.append(str(record.id))
+
+    session.flush()
+    audit_service.audit(
+        session,
+        action="virtual_accounts_provisioned",
+        actor_id=actor_id,
+        metadata={
+            "association_id": str(association_id),
+            "issued": len(issued),
+            "skipped": len(skipped),
+            "failed": failed,
+        },
+    )
+    return {
+        "issued": len(issued),
+        "skipped_previously_provisioned": len(skipped),
+        "failed": len(failed),
+        "failed_ids": failed,
+        "total_on_roster": len(records),
+    }
     """Mark pending invites as sent (background job sends email/SMS here).
 
     The actual delivery adapter is intentionally a stub: wire SendGrid,
@@ -255,6 +313,7 @@ def roster_view(
                 "claimed_by": user.name if user else None,
                 "claimed_by_id": str(record.user_id) if record.user_id else None,
                 "level": record.level,
+                "virtual_account_ref": record.virtual_account_ref,
                 "invite_status": record.invite_status.value,
                 "paid": record.id in paid_member_ids if active_cycle else None,
             }

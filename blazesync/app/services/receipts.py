@@ -3,6 +3,10 @@
 receipt.hash = SHA-256(payer_id | amount | timestamp | association_id |
 transaction_ref). Anyone holding the stored fields can recompute the hash and
 confirm the receipt wasn't tampered with — the demo's "prove it" moment.
+
+The receipt also snapshots the dues cycle's expectation statement at payment
+time, so what the money was owed *for* is frozen alongside the cryptographic
+proof — even if the treasurer later edits the cycle's statement.
 """
 
 import hashlib
@@ -39,6 +43,13 @@ def payer_id_for(payment: Payment) -> uuid.UUID:
     return payment.member_record.user_id or payment.member_record_id
 
 
+def expectation_statement_for(payment: Payment) -> str | None:
+    """Snapshot source: the payment's dues cycle statement, if set."""
+    cycle = payment.dues_cycle
+    statement = getattr(cycle, "expectation_statement", None)
+    return str(statement) if statement else None
+
+
 def generate_receipt(session: Session, payment: Payment) -> Receipt:
     receipt = Receipt(
         payment_id=payment.id,
@@ -49,19 +60,24 @@ def generate_receipt(session: Session, payment: Payment) -> Receipt:
             association_id=payment.dues_cycle.association_id,
             transaction_ref=payment.ecobank_transaction_ref,
         ),
+        expectation_statement_snapshot=expectation_statement_for(payment),
     )
     session.add(receipt)
     session.flush()
     return receipt
 
 
-def verify_receipt(session: Session, payment: Payment) -> dict:
-    """Recompute the hash from stored fields and compare — returns verified flag."""
-    receipt = session.exec(
+def latest_receipt(session: Session, payment: Payment) -> Receipt | None:
+    return session.exec(
         select(Receipt)
         .where(Receipt.payment_id == payment.id)
         .order_by(Receipt.generated_at.desc())
     ).first()
+
+
+def verify_receipt(session: Session, payment: Payment) -> dict:
+    """Recompute the hash from stored fields and compare — returns verified flag."""
+    receipt = latest_receipt(session, payment)
     if receipt is None:
         return {"receipt": None, "verified": False, "reason": "no receipt issued"}
     expected = compute_receipt_hash(
