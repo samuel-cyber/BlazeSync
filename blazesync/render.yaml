@@ -11,6 +11,9 @@ services:
     name: blazesync-api
     runtime: python
     plan: free
+    # The API lives in the blazesync/ subdirectory — build/start/health paths
+    # are all resolved relative to it (requirements.txt, alembic.ini, app/).
+    rootDir: blazesync
     healthCheckPath: /api/health
     # Build runs the Alembic migrations against Supabase, then starts uvicorn.
     buildCommand: pip install -r requirements.txt && alembic upgrade head
