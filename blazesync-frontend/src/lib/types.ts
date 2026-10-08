@@ -76,8 +76,12 @@ export interface MemberRecord {
     claimedAt: ISODate | null;
   };
   source: "roster" | "join_code";
-  /** The member's Ecobank virtual account, set when exco runs provisioning. */
-  virtualAccountRef: string | null;
+  /** Ecobank account-opening lifecycle (spec: open account, then mandate). */
+  accountStatus: "none" | "opening_pending" | "opened";
+  /** The member's Ecobank account number, set once account opening completes. */
+  linkedAccountRef: string | null;
+  /** Direct-debit mandate status — "active" enables automatic dues pulls. */
+  mandateStatus: "pending" | "active" | "revoked" | null;
 }
 
 export interface DuesCycle {

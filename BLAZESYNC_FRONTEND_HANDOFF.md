@@ -16,7 +16,7 @@
 | Ledger feed + **WebSocket live updates** + reconciliation | ✅ done |
 | Multi-sig disbursements (server-enforced threshold) | ✅ done |
 | Ecobank webhook with HMAC signature verification | ✅ done |
-| Backend test suite | ✅ 26/26 passing, lint clean |
+| Backend test suite | ✅ 47/47 passing, lint clean |
 | End-to-end smoke test (real HTTP incl. WebSocket) | ✅ passing |
 
 **Ecobank layer**: fully built (SHA-512 `requestToken`/`secureHash` per the developer-portal formulas, bearer auth, retries with backoff, webhook HMAC verification). Known-answer unit tests verify the hashing formulas. **Without sandbox credentials it runs in deterministic MOCK mode** — every endpoint behaves as if Ecobank answered, so the entire product can be developed and demoed offline.
@@ -267,7 +267,7 @@ uvicorn app.main:app --reload --port 8000
 ```
 - OpenAPI docs: `http://localhost:8000/docs` (use this to confirm exact schemas).
 - Optional `blazesync/.env` (copy from `.env.example`) — see `DEPLOYMENT.md` for the full variable reference and hosting runbook (Render blueprint included: `render.yaml`).
-- Tests: `pytest` (26 passing). Full demo journey: `python scripts/smoke_test.py http://127.0.0.1:8000`.
+- Tests: `pytest` (47 passing). Full demo journey: `python scripts/smoke_test.py http://127.0.0.1:8000`.
 
 Key env vars (all optional locally): `DATABASE_URL` (blank = embedded Postgres), `JWT_SECRET` (required non-default in production), `ALLOWED_ORIGINS` (add your frontend origin!), `ECOBANK_*` credentials (blank = mock mode), `MOCK_BALANCE_DRIFT` (set to e.g. `500` to demo the drift flag live).
 

@@ -307,8 +307,14 @@ export const api = {
   askQuestion(assocId: string, question: string): Promise<{ answer: string; grounded_via: string }> {
     return api.request(`/api/v1/associations/${assocId}/ask`, { method: "POST", body: { question } });
   },
-  provisionAccounts(assocId: string): Promise<{ ok: boolean; issued: number; skipped_previously_provisioned: number; failed: number; failed_ids?: string[]; total_on_roster: number }> {
-    return api.request(`/api/v1/associations/${assocId}/roster/provision-accounts`, { method: "POST", body: {} });
+  openAccounts(assocId: string): Promise<{ ok: boolean; opened: number; pending: number; total: number }> {
+    return api.request(`/api/v1/associations/${assocId}/roster/open-accounts`, { method: "POST", body: {} });
+  },
+  openAccount(memberRecordId: string): Promise<{ ok: boolean; member_record_id: string; account_status: string; account_ref: string | null }> {
+    return api.request(`/api/v1/member-records/${memberRecordId}/open-account`, { method: "POST", body: {} });
+  },
+  authorizeDirectDebit(memberRecordId: string): Promise<{ ok: boolean; member_record_id: string; mandate_ref: string; status: string }> {
+    return api.request(`/api/v1/member-records/${memberRecordId}/authorize-direct-debit`, { method: "POST", body: {} });
   },
 
   // ---------------- ledger

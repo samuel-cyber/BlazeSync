@@ -237,7 +237,7 @@ function toReceipt(w: { payment_id: string; amount: string; paid_via: string; st
   };
 }
 
-function toRosterItem(w: { id: string; name: string; matric_number: string | null; email: string; phone: string | null; claimed: boolean; claimed_by: string | null; level?: string; virtual_account_ref?: string | null; invite_status: string; paid: boolean | null }): MemberRecord {
+function toRosterItem(w: { id: string; name: string; matric_number: string | null; email: string; phone: string | null; claimed: boolean; claimed_by: string | null; level?: string; linked_account_ref?: string | null; account_status?: string; mandate_status?: string | null; invite_status: string; paid: boolean | null }): MemberRecord {
   return {
     id: w.id,
     associationId: "",
@@ -254,7 +254,9 @@ function toRosterItem(w: { id: string; name: string; matric_number: string | nul
       claimedAt: null,
     },
     source: "roster",
-    virtualAccountRef: w.virtual_account_ref ?? null,
+    accountStatus: (w.account_status ?? "none") as MemberRecord["accountStatus"],
+    linkedAccountRef: w.linked_account_ref ?? null,
+    mandateStatus: (w.mandate_status ?? null) as MemberRecord["mandateStatus"],
   };
 }
 
@@ -815,7 +817,9 @@ function useStoreValue() {
         userId,
         invite: { status: "claimed", code: inviteCode(rnd), sentAt: null, claimedAt: new Date().toISOString() },
         source: "join_code",
-        virtualAccountRef: null,
+        accountStatus: "none",
+        linkedAccountRef: null,
+        mandateStatus: null,
       });
       audit(draft, input.associationId, userId, "invite_claimed", `${input.name.trim()} joined with the association code`);
     });
@@ -874,7 +878,9 @@ function useStoreValue() {
           userId: null,
           invite: { status: "not_sent", code: inviteCode(rnd), sentAt: null, claimedAt: null },
           source: "roster",
-          virtualAccountRef: null,
+          accountStatus: "none",
+          linkedAccountRef: null,
+          mandateStatus: null,
         });
       }
       audit(draft, associationId, session!.userId, "roster_uploaded", `Uploaded ${rows.length} members from ${fileName}`);

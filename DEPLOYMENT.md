@@ -1,8 +1,16 @@
-# BlazeSync — Deployment Guide
+# BlazeSync — Deployment Guide (Render + Supabase + Vercel)
 
-Everything is wired: the frontend talks to the backend in **live mode**, and the
-original **demo mode** still works with zero backend (useful for demos and
-judge evaluation). This guide gets you from this repo to a running deployment.
+This guide takes the repo from a clean checkout to a running deployment:
+
+- **Backend** → Render web service (FastAPI + PostgreSQL)
+- **Database** → Supabase (managed Postgres)
+- **Frontend** → Vercel (Next.js App Router)
+
+Everything runs in **mock bank mode** with no Ecobank credentials, so you can
+ship the whole demo before the Ecobank sandbox email ever arrives. The bank
+integration is the **Account Opening Service** (members get real Ecobank
+accounts) plus **Payment From Ecobank Account** (direct-debit pulls for dues) —
+there are **no virtual accounts**.
 
 ---
 
@@ -10,64 +18,205 @@ judge evaluation). This guide gets you from this repo to a running deployment.
 
 | Piece | What it is | Deployed as |
 |---|---|---|
-| `blazesync/` | FastAPI + PostgreSQL backend (auth, ledger, dues, payouts, receipts, WebSocket) | One server (Railway/Render/Fly/VPS) |
-| `blazesync-frontend/` | Next.js (App Router) frontend | Vercel (or same host, static + node) |
-| Ecobank Unified API | Sandbox/production bank rails | Credentials via env vars |
+| `blazesync/` | FastAPI + PostgreSQL backend (auth, ledger, dues, payouts, receipts, WebSocket) | Render web service |
+| Supabase Postgres | Managed PostgreSQL 15/16 | Supabase project (external DB) |
+| `blazesync-frontend/` | Next.js (App Router) frontend | Vercel |
+| Ecobank Unified API | Sandbox/production bank rails | Credentials via env vars (optional) |
 
-The frontend decides mode automatically:
+The frontend decides its mode automatically:
 
-- **Live mode** — user signs up/logs in against the API (tokens stored in
-  `localStorage`, refreshed on expiry, WebSocket `?token=` auth).
+- **Live mode** — sign up / log in against the API (tokens in `localStorage`,
+  refreshed on expiry, WebSocket `?token=` auth).
 - **Demo mode** — the login page's "Try the demo" buttons; pure client-side
-  seed data. Great for pitching without a server.
+  seed data, no backend needed.
 
 ---
 
-## 2. What you need before deploying
+## 2. Create the Supabase database
 
-1. **A PostgreSQL database** — Railway, Neon, Supabase, or a managed instance.
-   (Local dev uses an embedded Postgres automatically; production requires
-   `DATABASE_URL` or the app refuses to boot.)
-2. **Ecobank sandbox credentials** — see **§7** below for the step-by-step of
-   getting them; you'll receive:
-   - `ECOBANK_USER_ID`, `ECOBANK_PASSWORD`, `ECOBANK_LAB_KEY`,
-     `ECOBANK_CLIENT_ID`, `ECOBANK_AFFILIATE_CODE`, `ECOBANK_SOURCE_CODE`,
-     `ECOBANK_WEBHOOK_SECRET`
-   - The sandbox base URL (`https://sandboxapi.ecobank.com` by default).
-   
-   > Without these the backend runs in **mock bank mode**: everything works
-   > (balances, payments, payouts, reconciliation) but no real money moves.
-   > Perfect for the demo; swap in real credentials for go-live.
-3. **A Vercel account** (or any Node host) for the frontend.
-4. **A domain** (optional but recommended) — needed for Ecobank webhooks to
-   reach you in production.
-5. **(Optional) An LLM API key** for Ask BlazeSync — any OpenAI-compatible
-   endpoint works (`ASK_LLM_API_KEY`, `ASK_LLM_BASE_URL`, `ASK_LLM_MODEL`).
-   Without it the Ask endpoint still works: it falls back to deterministic
-   ledger queries. No key is needed for anything else.
+1. Sign in at [supabase.com](https://supabase.com) → **New project**. Pick a
+   region close to your Render region (e.g. both in `eu-west`/`us-east`) to keep
+   latency low. Save the database password.
+2. Open **Project Settings → Database → Connection string**. You need one of
+   two forms:
+
+   | Type | Host | Port | When to use |
+   |---|---|---|---|
+   | **Session Pooler** | `aws-0-<region>.pooler.supabase.com` | `5432` | **Use this on Render** — IPv4-reachable, free-tier friendly |
+   | Direct connection | `db.<project-ref>.supabase.co` | `5432` | IPv6-only, not reachable from Render free tier |
+
+   Copy the **Session Pooler** URI and substitute your password:
+
+   ```env
+   DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+   ```
+
+   > **Why the pooler?** Supabase's direct `db.<ref>.supabase.co` host resolves
+   > to IPv6 only, and Render's free tier has no outbound IPv6 — connections
+   > hang and the deploy times out. The session pooler host is IPv4 and works.
+   > BlazeSync uses SQLAlchemy's `psycopg` (sync) driver, so use the **session**
+   > pooler (port `5432`), not the transaction pooler (port `6543`, which
+   > requires `statement_cache_size=0` and is meant for serverless).
+
+3. You do **not** need to create any tables. The app's build step runs Alembic
+   migrations (`alembic upgrade head`), which creates the schema — including
+   the append-only `ledger_entry` trigger, and migration `0004` which adds the
+   account-opening / direct-debit tables.
+
+> `app/config.py` normalizes both `postgres://` and `postgresql://` prefixes to
+> `postgresql+psycopg://` for you, so paste the raw Supabase string as-is.
 
 ---
 
-## 3. Deploy the backend
+## 3. Deploy the backend on Render
 
-### 3.1 Environment variables
+1. Push the repo to GitHub.
+2. Render Dashboard → **New +** → **Blueprint** → connect the repo. Render reads
+   [`blazesync/render.yaml`](blazesync/render.yaml:1) and provisions a single
+   Python web service, `blazesync-api`. The database is your Supabase project,
+   so **no Render database is created**.
+3. When prompted for the `sync: false` variables, set:
 
-Create these on your host (see `blazesync/.env.example` for the full list):
+   | Key | Value |
+   |---|---|
+   | `DATABASE_URL` | Your Supabase **Session Pooler** URI from §2 |
+   | `PUBLIC_BASE_URL` | `https://<your-service>.onrender.com` (Render assigns this) |
+   | `ALLOWED_ORIGINS` | Your **frontend** origin, e.g. `https://<your-app>.vercel.app` |
+
+   `JWT_SECRET` is auto-generated by the blueprint (`generateValue: true`). The
+   `ECOBANK_*` keys are intentionally **not declared** — leaving them out runs
+   mock mode. Add them in the Environment tab later when the sandbox email
+   arrives.
+4. **Apply**. The first build runs:
+
+   ```bash
+   pip install -r requirements.txt && alembic upgrade head
+   ```
+
+   `alembic upgrade head` connects to Supabase and creates the schema; then
+   uvicorn starts. The `/api/health` check gates the deploy.
+5. Verify:
+
+   - `https://<your-service>.onrender.com/api/health` → `{"status":"ok",...}`
+   - `https://<your-service>.onrender.com/docs` → interactive API docs
+
+### Environment variables reference
+
+| Key | Required? | Notes |
+|---|---|---|
+| `ENVIRONMENT` | yes | `production` enables guardrails (blueprint sets it) |
+| `DATABASE_URL` | **yes** | Supabase Session Pooler URI |
+| `JWT_SECRET` | **yes** | Auto-generated; app refuses to boot without a real value |
+| `PUBLIC_BASE_URL` | recommended | Your Render service URL |
+| `ALLOWED_ORIGINS` | recommended | Frontend origin(s), comma-separated |
+| `AUTO_MIGRATE` | no | `false` — the build already ran migrations |
+| `RECONCILE_INTERVAL_SECONDS` | no | Default `300`; `0` disables the loop |
+| `ECOBANK_*` | no | Blank ⇒ mock bank mode (see §6) |
+| `ASK_LLM_API_KEY` | no | Blank ⇒ deterministic rules answers |
+
+> The production guardrail in [`app/config.py`](blazesync/app/config.py:96) only
+> checks `JWT_SECRET` and `DATABASE_URL`. It **never** requires Ecobank creds.
+
+### Manual (non-Blueprint) alternative
+
+If you'd rather not use a Blueprint: **New + → Web Service**, root directory
+`blazesync`, build command `pip install -r requirements.txt && alembic upgrade head`,
+start command `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2`,
+health check `/api/health`, then add the env vars above in the dashboard.
+
+---
+
+## 4. Deploy the frontend on Vercel
+
+1. Vercel → **New Project** → import the repo → **Root Directory**
+   `blazesync-frontend`.
+2. Environment variable:
+
+   ```env
+   NEXT_PUBLIC_API_URL=https://<your-service>.onrender.com
+   ```
+
+   No trailing slash. (Locally the default `http://localhost:8000` is used.)
+3. Deploy. Framework Preset should auto-detect **Next.js**; build command is
+   `next build` and output directory is `.next`.
+4. Confirm the project's **Build and Deployment** settings are the defaults:
+   Framework Preset **Next.js**, Install Command **empty** (Vercel then runs
+   `npm install`), Build Command `next build`, Output Directory `.next`. If you
+   previously typed into these fields, clear them. The repo also ships
+   [`blazesync-frontend/vercel.json`](blazesync-frontend/vercel.json:1), which
+   pins the correct values and overrides any stray dashboard override — so a
+   fresh import needs no manual tweaking.
+
+> `NEXT_PUBLIC_*` values are inlined at **build time** — after changing this
+> variable you must redeploy the frontend for it to take effect.
+> Remember to add the Vercel origin back into the API's `ALLOWED_ORIGINS` and
+> redeploy the backend, or CORS preflights will fail.
+
+---
+
+## 5. Verify the full flow
+
+Sign up → create association → link the **association's** bank account (mock OTP:
+any 6 digits except `000000`) → upload roster (sample file button) → **open
+member accounts** (`POST .../roster/open-accounts`, or per-member open-account) →
+**authorize direct debit** for each member → open a dues cycle (with an
+expectation statement — it prints on the receipt) → pay as a member (a
+direct-debit pull against the member's mandate) → watch the ledger update live →
+ask the ledger a question in "Ask BlazeSync".
+
+**Go-live checklist (staging with mock bank):**
+
+- [ ] Supabase project created; Session Pooler URI captured
+- [ ] Backend deployed; build log shows `alembic upgrade head` succeeded
+- [ ] `/api/health` returns `{"status":"ok"}`
+- [ ] Frontend deployed; `NEXT_PUBLIC_API_URL` points at the API
+- [ ] CORS verified: sign-up works from the deployed frontend
+- [ ] Account opening works: `POST .../roster/open-accounts` returns `opened > 0`
+      in mock mode; re-running skips already-opened members (`opened == 0`)
+- [ ] Direct-debit mandate activates: `POST .../member-records/{id}/authorize-direct-debit`
+      returns `status: "active"` (mock) and is idempotent
+- [ ] Full flow works: setup → roster → open accounts → authorize → cycle → pay → receipt verifies
+- [ ] Paying with **no active mandate** returns `409` ("open account + authorize first")
+- [ ] Payout flow: request → second signatory approves → processing → completed
+- [ ] WebSocket live updates work (second tab sees payments instantly)
+- [ ] Ask BlazeSync answers from real data (check `grounded_via` in the response)
+- [ ] `JWT_SECRET` is a fresh random value; `ENVIRONMENT=production`
+
+---
+
+## 6. Ecobank credentials (optional)
+
+Without `ECOBANK_USER_ID`, `ECOBANK_PASSWORD`, `ECOBANK_LAB_KEY`, and
+`ECOBANK_CLIENT_ID`, the client runs in **deterministic mock mode** — balances,
+payouts, account opening, mandates, direct-debit dues, and reconciliation all
+work, but no real money moves. This is the intended path for a demo.
+
+To go live, register at [developer.ecobank.com](https://developer.ecobank.com);
+the credentials arrive **by email** (UserID, Password, Lab key). Then set these
+directly in the Render **Environment** tab.
+
+### Which products BlazeSync subscribes to
+
+Ecobank's portal lists the products as **tabs** ("Subscribe"), not a checkout.
+Map them to BlazeSync's calls:
+
+| BlazeSync call | Portal product to subscribe |
+|---|---|
+| [`account_enquiry()`](blazesync/app/ecobank/client.py:212) — reconciliation | **Account Enquiry** |
+| [`local_bank_payment()`](blazesync/app/ecobank/client.py:234) — payouts | **Local Bank Payment** |
+| [`open_account()`](blazesync/app/ecobank/client.py:278) — member accounts | **Account Opening** |
+| [`authorize_direct_debit()`](blazesync/app/ecobank/client.py:337) — mandates | **Payment From Ecobank Account** |
+| [`initiate_direct_debit_payment()`](blazesync/app/ecobank/client.py:391) — pull dues | **Payment From Ecobank Account** |
+
+Subscribe to **Account Enquiry**, **Local Bank Payment**, **Account Opening**,
+and **Payment From Ecobank Account**. **Bill Payment**, **Remittance**, and
+**Xpress Cash** are not used.
+
+Each service is authenticated with its own scoped bearer token, so the
+`ACCOUNT_OPENING` and `DIRECTDEBIT` service codes must be enabled on your
+profile for those two paths to answer.
 
 ```env
-ENVIRONMENT=production
-
-# Security — GENERATE REAL VALUES, do not reuse
-JWT_SECRET=<openssl rand -hex 32>
-
-# Database (from your Postgres provider)
-DATABASE_URL=postgresql://user:pass@host:5432/blazesync
-
-# CORS: your frontend's production origin(s), comma-separated
-PUBLIC_BASE_URL=https://api.yourdomain.com
-ALLOWED_ORIGINS=https://app.yourdomain.com
-
-# Bank — leave blank for mock mode in staging
 ECOBANK_USER_ID=
 ECOBANK_PASSWORD=
 ECOBANK_LAB_KEY=
@@ -77,246 +226,98 @@ ECOBANK_SOURCE_CODE=
 ECOBANK_BASE_URL=https://sandboxapi.ecobank.com
 ECOBANK_ORIGIN=developer.ecobank.com
 ECOBANK_WEBHOOK_SECRET=
-
-# Optional tuning
-ACCESS_TOKEN_MINUTES=15
-REFRESH_TOKEN_DAYS=7
-INVITE_EXPIRY_DAYS=14
-AUTO_MIGRATE=true
-
-# Ask BlazeSync — optional; empty key = deterministic rules fallback
-ASK_LLM_API_KEY=
-ASK_LLM_BASE_URL=https://api.openai.com/v1
-ASK_LLM_MODEL=gpt-4o-mini
-ASK_LLM_TIMEOUT_SECONDS=20
 ```
 
-**Notes**
+Do **not** declare these in `render.yaml` with `sync: false` — that makes the
+Blueprint apply wait for values you don't have yet. Set them in the dashboard
+post-deploy (a plain code deploy is not required; an env change restarts the
+service).
 
-- `ALLOWED_ORIGINS` **must** include your frontend's exact origin (scheme +
-  host, no trailing slash). A mismatch = CORS preflight failures. (This bit us
-  locally — same rule in prod.)
-- `AUTO_MIGRATE=true` runs Alembic migrations on boot (fine for a single
-  instance). For multi-instance deployments set `false` and run
-  `alembic upgrade head` as a release step instead.
+Register the webhook URL with Ecobank once you have a public domain:
 
-### 3.2 Run it
+```
+https://<your-service>.onrender.com/api/v1/webhooks/ecobank/notification
+```
+
+The handler verifies the HMAC-SHA512 signature (`X-Ecobank-Signature`) against
+`ECOBANK_WEBHOOK_SECRET`, then processes these event types:
+
+| Event | Effect |
+|---|---|
+| `account.opened` | completes an async account opening (`opening_pending` → `opened`) |
+| `mandate.activated` | flips a mandate from `pending` → `active` |
+| `direct_debit.confirmed` | settles a pending dues payment (receipt + ledger) |
+| `collection.confirmed` | settles a pending collection |
+| `transfer.completed` | completes a payout |
+
+> **Unverified against the live sandbox.** Event names, endpoint paths
+> (`/accounts/open`, `/direct-debit/mandate`, `/direct-debit/payment`), and
+> field names (`accountNumber` vs `accountNo`, `mandateReference` vs
+> `mandateRef`) are defensive assumptions. Confirm them against real sandbox
+> responses before trusting the async paths.
+
+---
+
+## 7. Supabase operational notes
+
+- **Backups** — Supabase takes daily backups on paid plans; on the free tier,
+  export with `pg_dump` if the data matters:
+  `pg_dump "<session-pooler-uri>" > backup.sql`.
+- **Connection limits** — the free tier caps concurrent connections. The app
+  keeps a small pool (`pool_pre_ping=True`, default size); if you raise
+  `--workers`, watch the pooler's connection cap.
+- **Row Level Security** — BlazeSync enforces authorization in the app layer
+  (association-scoped RBAC) and never exposes Supabase to the browser, so RLS
+  policies are not required. The frontend only ever talks to the Render API.
+- **Migrations** — to apply a new migration to Supabase without a redeploy:
+  `DATABASE_URL="<session-pooler-uri>" alembic upgrade head` from `blazesync/`.
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Build fails: `Could not open requirements file: ... 'requirements.txt'` | Render ran the build from the repo root, but the API lives in `blazesync/` | The blueprint sets `rootDir: blazesync` — re-sync the Blueprint, or set **Root Directory** to `blazesync` in the service Settings |
+| Deploy hangs / DB connect timeout | Using Supabase's direct `db.<ref>.supabase.co` host (IPv6) from Render | Switch to the **Session Pooler** URI (IPv4) |
+| App won't boot: "Refusing to start in production…" | Blank `JWT_SECRET` or `DATABASE_URL` | Set both in the Render Environment tab |
+| CORS preflight failures in the browser | `ALLOWED_ORIGINS` doesn't exactly match the frontend origin (scheme + host, no trailing slash) | Correct it and redeploy the API |
+| Frontend still calls `localhost:8000` | `NEXT_PUBLIC_API_URL` missing or set after build | Set it and **redeploy** the frontend (build-time inline) |
+| Vercel: `Running "install" command: \`.next\`` → `command not found` (exit 127) | The project's **Install Command** was set to `.next` (the output directory) | Clear the **Install Command** field so Vercel runs `npm install` (or set it to `npm install`), Framework Preset = **Next.js**, Root Directory = `blazesync-frontend`; [`blazesync-frontend/vercel.json`](blazesync-frontend/vercel.json:1) now also pins the correct values |
+| Blueprint apply stuck on a blank prompt | `sync: false` keys awaiting values | Provide them, or remove those keys from [`blazesync/render.yaml`](blazesync/render.yaml:1) |
+| `alembic upgrade head` fails on build | Wrong password / pooler port / DB not ready | Re-copy the Session Pooler URI; confirm port `5432` |
+| `DuplicateObject: type "…_enum" already exists` on build | Old migration double-created a Postgres enum | Already fixed in `0004_account_opening_dd`; ensure you're on the latest revision |
+| Paying returns `409` "No active direct-debit mandate" | Member has no opened account / active mandate | Open the account, then authorize direct debit for that member |
+
+---
+
+## 9. Local development (unchanged)
 
 ```bash
 cd blazesync
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+py -3 scripts/_run_dev.py 8000                                  # embedded Postgres + API
+DEV_ORIGIN=http://localhost:3000 py -3 scripts/_run_dev.py 8000 # frontend on :3000
 ```
 
-Check `GET /api/health` → `{"status":"ok",...}` and `/docs` (interactive API
-docs — good for judges).
+Tests: `py -3 scripts/_run_tests.py -q` (embedded Postgres, real triggers).
 
-### 3.3 Local development (already set up)
-
-```bash
-cd blazesync
-py -3 scripts/_run_dev.py 8000          # embedded Postgres + API in one process
-DEV_ORIGIN=http://localhost:3000 py -3 scripts/_run_dev.py 8000   # if frontend runs on :3000
-```
-
-Tests: `py -3 scripts/_run_tests.py -q` (embedded Postgres, 45 tests).
+Local dev needs **no** Supabase project and **no** Ecobank account — with no
+`DATABASE_URL`, the app boots an embedded real PostgreSQL cluster in
+`.pgserver/`, and with no `ECOBANK_*` it runs in mock mode.
 
 ---
 
-## 4. Deploy the frontend
-
-1. Push the repo to GitHub.
-2. In Vercel: **New Project → import** → root directory `blazesync-frontend`.
-3. Environment variable:
-
-   ```env
-   NEXT_PUBLIC_API_URL=https://api.yourdomain.com
-   ```
-
-   (No trailing slash. Locally the default `http://localhost:8000` is used.)
-4. Deploy. Build command is `next build`, output is the default.
-
-Verify the flow: sign up → create association → link bank account (mock OTP:
-any 6 digits except `000000`) → upload roster (sample file button) → open a
-dues cycle (with an expectation statement — it prints on the receipt) → pay as
-a member → watch the ledger update live → ask the ledger a question in the
-"Ask BlazeSync" box.
-
----
-
-## 5. Go-live checklist (your side)
-
-**Staging first (mock bank):**
-
-- [ ] Backend deployed, `/api/health` returns ok
-- [ ] Frontend deployed, `NEXT_PUBLIC_API_URL` points at it
-- [ ] CORS verified: sign-up works from the deployed frontend
-- [ ] Full flow works: setup → roster → cycle → pay → receipt verifies
-- [ ] Payout flow: request → second signatory approves → processing → completed
-- [ ] WebSocket live updates work (second browser tab sees payments instantly)
-- [ ] Roster provisioning works: `POST .../roster/provision-accounts` issues
-      mock VAs and re-running skips the already-provisioned
-- [ ] Ask BlazeSync answers from real data (LLM or rules fallback; check
-      `grounded_via` in the response)
-- [ ] JWT_SECRET is a fresh random value; ENVIRONMENT=production
-
-**Production (real Ecobank):**
-
-- [ ] Ecobank production credentials received and configured
-- [ ] `ECOBANK_BASE_URL` switched from sandbox to production
-- [ ] Webhook URL registered with Ecobank:
-      `https://api.yourdomain.com/api/v1/webhooks/ecobank/notification`
-      with the webhook secret set
-- [ ] Provision real VAs for the roster, then test the full happy path:
-      transfer a small amount into one member's VA → webhook fires → payment
-      auto-attributed → ledger updates live → receipt shows the expectation
-      statement and verifies
-- [ ] Ask BlazeSync: confirm the LLM path is grounded (`grounded_via: "llm"`)
-      and refuses questions outside the data
-- [ ] Test with a small real disbursement you control
-- [ ] Database backups enabled (managed Postgres usually does this)
-- [ ] Monitor: application logs + `audit_log` table (every sensitive action
-      lands there)
-
-**Association onboarding (real treasurers):**
-
-1. Treasurer signs up → "I manage my association's money".
-2. Links the association's **Ecobank business account** (bank sends an OTP to
-   the phone registered on that account — BlazeSync never asks for banking
-   PINs/passwords).
-3. Uploads the member roster CSV (name, matric, level, email/phone).
-4. **Provisions virtual accounts** — one per roster member (see §6.1 below).
-5. Invites co-signatories; sets the signature rule (min 2 — a payout can never
-   move on one person's approval alone).
-6. Opens a dues cycle (flat amount, or per-level pricing) **and writes the
-   expectation statement** — the plain-language promise of what the money funds,
-   printed on every receipt.
-7. Members claim their invite links (the contact in the claim form must match
-   what the roster has) and pay; every payment gets a tamper-evident receipt
-   with the expectation statement frozen onto it.
-
----
-
-## 6. The spec features, in production terms
-
-### 6.1 Virtual accounts & provisioning
-
-`POST /api/v1/associations/{id}/roster/provision-accounts` issues one Ecobank
-virtual account per roster member. Key properties:
-
-- **Idempotent** — already-provisioned members are skipped, so it's safe to
-  re-run (e.g. after adding roster rows). Re-upload a CSV with new members,
-  then provision again.
-- **Partial failures don't abort the run** — the response reports
-  `issued` / `skipped_previously_provisioned` / `failed` (with `failed_ids`),
-  and re-running retries only the failures.
-- **Mock mode** provisions deterministic fake accounts (11 + 8 hex digits,
-  derived from the association + member), so the full flow demos without bank
-  credentials.
-- Once provisioned, the member's VA ref shows on the roster, and any credit
-  that lands in it is auto-attributed (see 6.2).
-
-> **Frontend note:** the API client method (`provisionAccounts`) exists, but
-> there's no UI button yet. Trigger provisioning from the API docs UI at
-> `/docs` for now — a "Provision accounts" button on the roster page is an easy
-> follow-up.
-
-### 6.2 Webhook auto-attribution
-
-Ecobank calls `POST /api/v1/webhooks/ecobank/notification` when money lands in
-any provisioned VA. The handler verifies the HMAC signature first, then:
-
-1. Finds the member whose VA was credited (unmatched refs are logged to
-   `audit_log`, never guessed).
-2. Matches them to the association's open dues cycle and records the payment
-   (idempotent by transaction ref — redeliveries are safe).
-3. Writes the ledger entry and pushes a live WebSocket update — the treasurer's
-   screen updates the moment Ecobank confirms.
-
-Register this URL with Ecobank (staging + production):
-`https://api.yourdomain.com/api/v1/webhooks/ecobank/notification`
-
-### 6.3 Expectation statements
-
-Set when a cycle is created (or patched later) as `expectation_statement`. It's
-snapshotted onto each receipt at payment time, so what the money was owed *for*
-is frozen alongside the cryptographic proof — editing the cycle afterwards
-can't rewrite old receipts. Receipts display it as "What this money funds".
-
-### 6.4 Ask BlazeSync
-
-`POST /api/v1/associations/{id}/ask` — read-only, available to any member of
-the association. It builds a compact context from the association's real data
-(balance, category totals, active cycle, roster payment status, recent entries)
-and either:
-
-- calls the LLM with a strict system prompt (answer only from the context,
-  say "I don't have that information" rather than guess), or
-- falls back to deterministic ledger queries when `ASK_LLM_API_KEY` is unset.
-
-The response's `grounded_via` field says which path answered (`llm` or
-`rules`). The endpoint can never mutate anything. LLM traffic is outbound-only
-from your server; the key never reaches the browser.
-
-## 7. Getting Ecobank sandbox credentials
-
-Per Ecobank's own [Unified API getting-started guide](https://apimuat-developer.ecobank.com/documentation/getting-started),
-the credentials arrive **by email after you register** — there's no key you
-generate yourself:
-
-1. **Register on the developer portal** — [developer.ecobank.com](https://developer.ecobank.com)
-   → the sandbox-access / Register flow. Fill in your details and submit.
-   (On the newer API-management portal you instead click **Sign In → Continue
-   as Partner → Sign up now**, verify your email with the code they send, and
-   complete the form.)
-2. **Wait for the confirmation email.** It contains exactly the pieces
-   BlazeSync needs:
-   | Email item | BlazeSync env var |
-   |---|---|
-   | **UserID** | `ECOBANK_USER_ID` — used for token generation |
-   | **Password** | `ECOBANK_PASSWORD` — used for token generation |
-   | **Lab key** | `ECOBANK_LAB_KEY` — used to compute the `secureHash` |
-   | Documentation link + test-case file | (for the go-live request later) |
-   Keep the registration username/password safe — they're what you log in with
-   when requesting go-live.
-3. **Subscribe to the services you use.** On the portal (or the newer "Sign in
-   → Products" flow), subscribe to the products BlazeSync touches: token
-   generation / authentication, **Collection & Payments**, **Account Services
-   (Account Enquiry)**, **Local Bank Payments**, and virtual accounts if
-   offered. Each subscription has primary/secondary keys — if the portal
-   issues per-product keys, put the relevant one into `ECOBANK_CLIENT_ID`,
-   and set `ECOBANK_AFFILIATE_CODE` / `ECOBANK_SOURCE_CODE` to the values the
-   sandbox docs/examples use.
-4. **Don't change sandbox request bodies** — for sandbox testing Ecobank
-   expects the predefined test data; only auth headers/origin vary.
-   BlazeSync already sends `Origin: developer.ecobank.com` (the
-   `ECOBANK_ORIGIN` var).
-5. **Test the two primitives in isolation first** (Token generation and the
-   Hashing Service) before wiring flows — BlazeSync's client already does
-   token-caching + retry/backoff, so once those two work the rest follows.
-6. **Go-live is a separate request** — complete the test-case document they
-   emailed, re-login on the portal, and submit it with basic KYC. Production
-   credentials follow after their review.
-
-If you can't get registered quickly (deadline!), skip this entirely:
-**leaving every `ECOBANK_*` variable blank runs the whole app in mock bank
-mode** — real flows, real pages, deterministic fake money. Ideal for the
-demo/judging; swap in sandbox creds whenever the email arrives.
-
-## 8. Where things live (for future maintenance)
+## 10. Where things live
 
 | Area | Path |
 |---|---|
-| API client / token refresh | `blazesync-frontend/src/lib/api.ts` |
-| Live WebSocket hook | `blazesync-frontend/src/lib/live.ts` |
-| Store (demo + live modes) | `blazesync-frontend/src/lib/store.tsx` |
-| Backend routers | `blazesync/app/routers/` |
-| Bank client (mock-aware) | `blazesync/app/ecobank/client.py` |
-| Receipt hash (tamper evidence) | `blazesync/app/services/receipts.py` ↔ `blazesync-frontend/src/lib/receipt-hash.ts` |
-| Virtual account provisioning | `blazesync/app/services/roster.py` (`provision_accounts`) |
-| VA issuance (bank side) | `blazesync/app/ecobank/client.py` (`create_virtual_account`) |
-| Webhook credit attribution | `blazesync/app/routers/webhooks.py` |
-| Ask BlazeSync | `blazesync/app/services/ask.py` + `blazesync/app/routers/ask.py` |
-| Migrations | `blazesync/migrations/versions/` |
-| Integration tests | `blazesync/tests/test_integration_wire.py` |
-| Spec-gap tests | `blazesync/tests/test_spec_gaps.py` |
+| Render blueprint | [`blazesync/render.yaml`](blazesync/render.yaml:1) |
+| Env-driven settings + prod guardrails | [`blazesync/app/config.py`](blazesync/app/config.py:1) |
+| DB engine / embedded Postgres fallback | [`blazesync/app/db.py`](blazesync/app/db.py:1) |
+| Migrations (schema + append-only trigger) | [`blazesync/migrations/versions/`](blazesync/migrations/versions) |
+| Bank client (mock-aware) | [`blazesync/app/ecobank/client.py`](blazesync/app/ecobank/client.py:1) |
+| Account-opening + mandate service | [`blazesync/app/services/roster.py`](blazesync/app/services/roster.py:144) |
+| Dues + direct-debit payment service | [`blazesync/app/services/payments.py`](blazesync/app/services/payments.py:77) |
+| Webhook signature + handlers | [`blazesync/app/routers/webhooks.py`](blazesync/app/routers/webhooks.py:1) |
+| API client / token refresh (frontend) | [`blazesync-frontend/src/lib/api.ts`](blazesync-frontend/src/lib/api.ts:1) |
+| Live WebSocket hook | [`blazesync-frontend/src/lib/live.ts`](blazesync-frontend/src/lib/live.ts:1) |
