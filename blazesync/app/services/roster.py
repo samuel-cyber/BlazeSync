@@ -16,7 +16,12 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from ..config import settings
+from ..ecobank import EcobankError
+from ..ecobank import client as ecobank_client
 from ..models import (
+    AccountOpeningStatus,
+    DirectDebitMandate,
+    DirectDebitStatus,
     DuesCycle,
     InviteStatus,
     MemberRecord,
@@ -136,65 +141,166 @@ def import_roster(
     return created
 
 
-def provision_accounts(
+def open_account(
     session: Session,
-    association_id: uuid.UUID,
+    member_record: MemberRecord,
     actor_id: uuid.UUID | None,
 ) -> dict:
-    """Issue an Ecobank virtual account for every roster member lacking one.
+    """Open a real Ecobank account for one roster member (Account Opening).
 
-    Idempotent and batch-safe: already-provisioned members are skipped, a
-    single member's provider failure doesn't abort the batch, and the audit
-    metadata reports exactly which rows remain unprovisioned for retries.
+    Idempotent: a member already ``opened`` (or mid-flight ``opening_pending``)
+    is left untouched. The sandbox may confirm synchronously (status becomes
+    ``opened`` and the account ref is stored) or asynchronously (status stays
+    ``opening_pending`` until a notification event completes it).
     """
     from .. import audit as audit_service
-    from ..ecobank import client as ecobank_client
 
-    records = session.exec(
-        select(MemberRecord).where(
-            MemberRecord.association_id == association_id,
-        )
-    ).all()
-    issued, skipped, failed = [], [], []
-    for record in records:
-        if record.virtual_account_ref:
-            skipped.append(str(record.id))
-            continue
-    # Only unprovisioned rows are attempted.
-    for record in records:
-        if record.virtual_account_ref:
-            continue
-        result = ecobank_client.create_virtual_account(
-            member_name=record.name,
-            customer_ref=f"{association_id}:{record.id}",
-            association_id=association_id,
-        )
-        if result.success and result.account_number:
-            record.virtual_account_ref = result.account_number
-            session.add(record)
-            issued.append(str(record.id))
-        else:
-            failed.append(str(record.id))
+    if member_record.account_status is AccountOpeningStatus.opened:
+        return {
+            "member_record_id": str(member_record.id),
+            "account_status": member_record.account_status.value,
+            "account_ref": member_record.linked_account_ref,
+            "skipped": True,
+        }
+    if member_record.account_status is AccountOpeningStatus.opening_pending:
+        return {
+            "member_record_id": str(member_record.id),
+            "account_status": member_record.account_status.value,
+            "account_ref": member_record.linked_account_ref,
+            "skipped": True,
+        }
 
+    result = ecobank_client.open_account(
+        member_name=member_record.name,
+        customer_ref=f"{member_record.association_id}:{member_record.id}",
+    )
+    if result.success and result.status == "opened" and result.account_number:
+        member_record.linked_account_ref = result.account_number
+        member_record.account_status = AccountOpeningStatus.opened
+    elif result.success:
+        # Provider accepted the request but is provisioning asynchronously.
+        member_record.account_status = AccountOpeningStatus.opening_pending
+    else:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ecobank account opening failed: {result.message or 'provider unavailable'}",
+        )
+    session.add(member_record)
     session.flush()
     audit_service.audit(
         session,
-        action="virtual_accounts_provisioned",
+        action="account_opened",
         actor_id=actor_id,
         metadata={
-            "association_id": str(association_id),
-            "issued": len(issued),
-            "skipped": len(skipped),
-            "failed": failed,
+            "association_id": str(member_record.association_id),
+            "member_record_id": str(member_record.id),
+            "account_status": member_record.account_status.value,
+            "account_ref": member_record.linked_account_ref,
         },
     )
     return {
-        "issued": len(issued),
-        "skipped_previously_provisioned": len(skipped),
-        "failed": len(failed),
-        "failed_ids": failed,
-        "total_on_roster": len(records),
+        "member_record_id": str(member_record.id),
+        "account_status": member_record.account_status.value,
+        "account_ref": member_record.linked_account_ref,
+        "skipped": False,
     }
+
+
+def authorize_direct_debit(
+    session: Session,
+    member_record: MemberRecord,
+    actor_id: uuid.UUID | None,
+) -> dict:
+    """Register the member's direct-debit mandate (Payment From Ecobank Account).
+
+    Requires an opened account. Creates (or reuses) the member's single mandate
+    row and marks it ``active`` once the provider confirms authorization; a
+    provider that returns ``pending`` leaves the mandate awaiting the member's
+    confirmation (completed later by a notification event).
+    """
+    from .. import audit as audit_service
+
+    if member_record.account_status is not AccountOpeningStatus.opened:
+        raise HTTPException(
+            status_code=409,
+            detail="Open the member's Ecobank account before authorizing direct debit",
+        )
+    if not member_record.linked_account_ref:
+        raise HTTPException(status_code=409, detail="Member has no linked account")
+
+    mandate = session.exec(
+        select(DirectDebitMandate).where(
+            DirectDebitMandate.member_record_id == member_record.id
+        )
+    ).first()
+
+    if mandate is not None and mandate.status is DirectDebitStatus.active:
+        return {
+            "member_record_id": str(member_record.id),
+            "mandate_ref": mandate.mandate_ref,
+            "status": mandate.status.value,
+            "skipped": True,
+        }
+
+    try:
+        result = ecobank_client.authorize_direct_debit(
+            account_ref=member_record.linked_account_ref,
+            reference=f"{member_record.association_id}:{member_record.id}",
+        )
+    except EcobankError as exc:
+        raise HTTPException(
+            status_code=502, detail="Ecobank mandate authorization unavailable"
+        ) from exc
+
+    if not result.success or not result.mandate_ref:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Mandate authorization failed: {result.message or 'provider unavailable'}",
+        )
+
+    status = (
+        DirectDebitStatus.active
+        if result.status == "active"
+        else DirectDebitStatus.pending
+    )
+    if mandate is None:
+        mandate = DirectDebitMandate(
+            member_record_id=member_record.id,
+            account_ref=member_record.linked_account_ref,
+            mandate_ref=result.mandate_ref,
+            status=status,
+            authorized_at=utcnow() if status is DirectDebitStatus.active else None,
+        )
+    else:
+        mandate.mandate_ref = result.mandate_ref
+        mandate.account_ref = member_record.linked_account_ref
+        mandate.status = status
+        mandate.authorized_at = utcnow() if status is DirectDebitStatus.active else None
+    session.add(mandate)
+    session.flush()
+    audit_service.audit(
+        session,
+        action="direct_debit_authorized",
+        actor_id=actor_id,
+        metadata={
+            "association_id": str(member_record.association_id),
+            "member_record_id": str(member_record.id),
+            "mandate_ref": mandate.mandate_ref,
+            "status": mandate.status.value,
+        },
+    )
+    return {
+        "member_record_id": str(member_record.id),
+        "mandate_ref": mandate.mandate_ref,
+        "status": mandate.status.value,
+        "skipped": False,
+    }
+
+
+def send_invites(
+    session: Session,
+    association_id: uuid.UUID,
+) -> int:
     """Mark pending invites as sent (background job sends email/SMS here).
 
     The actual delivery adapter is intentionally a stub: wire SendGrid,
@@ -277,6 +383,22 @@ def claim_invite(
         actor_id=user.id,
         metadata={"member_record_id": str(record.id), "association_id": str(record.association_id)},
     )
+
+    # Step 4 onboarding — best-effort so a provider hiccup never fails the
+    # claim. Open the member's Ecobank account, then (once it is live)
+    # authorize the direct-debit mandate; only an active mandate later lets
+    # the member be pulled for automatic dues collection.
+    try:
+        if record.account_status is AccountOpeningStatus.none:
+            open_account(session, record, actor_id=user.id)
+        if record.account_status is AccountOpeningStatus.opened:
+            authorize_direct_debit(session, record, actor_id=user.id)
+    except HTTPException as exc:
+        logger.warning(
+            "onboarding incomplete for member %s (claim still succeeds): %s",
+            record.id,
+            exc.detail,
+        )
     return record
 
 
@@ -299,9 +421,23 @@ def roster_view(
         ).all()
         paid_member_ids = {p.member_record_id for p in payments}
 
+    mandates = (
+        {
+            m.member_record_id: m
+            for m in session.exec(
+                select(DirectDebitMandate).where(
+                    DirectDebitMandate.member_record_id.in_([r.id for r in records])
+                )
+            ).all()
+        }
+        if records
+        else {}
+    )
+
     items = []
     for record in records:
         user = session.get(User, record.user_id) if record.user_id else None
+        mandate = mandates.get(record.id)
         items.append(
             {
                 "id": str(record.id),
@@ -313,7 +449,10 @@ def roster_view(
                 "claimed_by": user.name if user else None,
                 "claimed_by_id": str(record.user_id) if record.user_id else None,
                 "level": record.level,
-                "virtual_account_ref": record.virtual_account_ref,
+                "linked_account_ref": record.linked_account_ref,
+                "account_status": record.account_status.value,
+                "mandate_status": mandate.status.value if mandate else None,
+                "mandate_ref": mandate.mandate_ref if mandate else None,
                 "invite_status": record.invite_status.value,
                 "paid": record.id in paid_member_ids if active_cycle else None,
             }

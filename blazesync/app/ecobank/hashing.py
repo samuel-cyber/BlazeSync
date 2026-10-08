@@ -102,18 +102,41 @@ def local_transfer_hash(
     )
 
 
-def virtual_account_hash(
+def account_opening_hash(
     request_id: str,
     rt: str,
     customer_name: str,
     customer_ref: str,
+    product_code: str,
 ) -> str:
-    """Virtual Account issuance: ... + requestToken + customerName +
-    customerReference + secretKey.
+    """Account Opening Service: ... + requestToken + customerName +
+    customerReference + productCode + secretKey.
 
-    The sandbox virtual-account service hashes the account-holder name and
-    our internal reference in that order after the requestToken — verified
-    against the portal's Virtual Account page; adjust here (one place) if
-    the field order shifts in a portal revision.
+    The sandbox hashes the account-holder name, our internal reference, and the
+    requested product code in that order after the requestToken — verified
+    against the portal's Account Opening page; adjust here (one place) if the
+    field order shifts in a portal revision.
     """
-    return secure_hash(request_id, "VIRTUAL_ACCT", rt, customer_name, customer_ref)
+    return secure_hash(
+        request_id, "ACCOUNT_OPENING", rt, customer_name, customer_ref, product_code
+    )
+
+
+def direct_debit_hash(
+    request_id: str,
+    rt: str,
+    mandate_ref: str,
+    account_no: str,
+    amount: str,
+    currency: str,
+) -> str:
+    """Payment From Ecobank Account (direct debit): ... + requestToken +
+    mandateReference + accountNo + amountString + currency + secretKey.
+
+    The mandate reference identifies the member's standing authorization; the
+    account is the debit source. Field order follows the portal's direct-debit
+    page; adjust here (one place) if it shifts in a portal revision.
+    """
+    return secure_hash(
+        request_id, "DIRECTDEBIT", rt, mandate_ref, account_no, amount, currency
+    )

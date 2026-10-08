@@ -80,6 +80,31 @@ class Decision(enum.StrEnum):
     rejected = "rejected"
 
 
+class AccountOpeningStatus(enum.StrEnum):
+    """Lifecycle of a roster member's Ecobank account-opening journey.
+
+    none → opening_pending (open-account called) → opened (account live).
+    Replaces the old virtual-account provisioning model: we no longer issue
+    a bank-side VA; we open a real Ecobank account for the member instead.
+    """
+
+    none = "none"
+    opening_pending = "opening_pending"
+    opened = "opened"
+
+
+class DirectDebitStatus(enum.StrEnum):
+    """Mandate lifecycle for pulling dues from a member's Ecobank account.
+
+    pending → active (member authorized the pull) → revoked.
+    Only an ``active`` mandate can be debited by dues collection.
+    """
+
+    pending = "pending"
+    active = "active"
+    revoked = "revoked"
+
+
 # --- Tables -------------------------------------------------------------------
 
 
@@ -153,11 +178,20 @@ class MemberRecord(SQLModel, table=True):
     # Academic level used for per-level dues pricing ("100L"…"500L").
     level: str = Field(default="300L", sa_column=Column(String(8), nullable=False, server_default="300L"))
     user_id: uuid.UUID | None = Field(default=None, foreign_key="user.id", index=True)
-    # Set when roster provisioning issues the member's Ecobank virtual account;
-    # credits landing in it are attributable to this member without manual matching.
-    virtual_account_ref: str | None = Field(
+    # The member's own Ecobank account, opened via the Account Opening Service.
+    # Replaces the old virtual-account model: dues are pulled from *this*
+    # account by an authorized direct-debit mandate, not pushed into a VA.
+    linked_account_ref: str | None = Field(
         default=None,
-        sa_column=Column(String(64), unique=True, index=True, nullable=True),
+        sa_column=Column(String(64), index=True, nullable=True),
+    )
+    account_status: AccountOpeningStatus = Field(
+        default=AccountOpeningStatus.none,
+        sa_column=Column(
+            SAEnum(AccountOpeningStatus, name="account_opening_status_enum", native_enum=True),
+            nullable=False,
+            index=True,
+        ),
     )
     invite_code: str = Field(unique=True, index=True)
     invite_status: InviteStatus = Field(
@@ -173,6 +207,40 @@ class MemberRecord(SQLModel, table=True):
     association: Association = Relationship(back_populates="member_records")
     user: "User" = Relationship()  # nullable until the invite is claimed
     payments: list["Payment"] = Relationship(back_populates="member_record")
+    mandates: list["DirectDebitMandate"] = Relationship(back_populates="member_record")
+
+
+class DirectDebitMandate(SQLModel, table=True):
+    """A member's authorization for BlazeSync to pull dues from their account.
+
+    Created when the member runs the direct-debit consent flow after their
+    Ecobank account is opened. ``account_ref`` is the member's own account
+    (the debit source); ``mandate_ref`` is the provider-issued mandate id that
+    every collection request references. Only an ``active`` mandate may be
+    debited — this is the enforcement point for "no mandate, no collection".
+    """
+
+    __tablename__ = "direct_debit_mandate"
+    __table_args__ = (
+        UniqueConstraint("member_record_id", name="uq_direct_debit_mandate_member"),
+    )
+
+    id: uuid.UUID = Field(default_factory=new_uuid, primary_key=True)
+    member_record_id: uuid.UUID = Field(foreign_key="member_record.id", index=True)
+    account_ref: str = Field(index=True)
+    mandate_ref: str = Field(unique=True, index=True)
+    status: DirectDebitStatus = Field(
+        default=DirectDebitStatus.pending,
+        sa_column=Column(
+            SAEnum(DirectDebitStatus, name="direct_debit_status_enum", native_enum=True),
+            nullable=False,
+            index=True,
+        ),
+    )
+    authorized_at: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow)
+
+    member_record: MemberRecord = Relationship(back_populates="mandates")
 
 
 class DuesCycle(SQLModel, table=True):

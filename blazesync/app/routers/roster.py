@@ -16,12 +16,13 @@ from sqlmodel import Session, select
 
 from ..audit import audit
 from ..db import get_session
-from ..deps import get_current_user, require_role
+from ..deps import get_current_user, require_role, role_in_association
 from ..models import (
     Association,
     CycleStatus,
     DuesCycle,
     MemberRecord,
+    Membership,
     Payment,
     PaymentStatus,
     Role,
@@ -80,20 +81,77 @@ async def upload_roster(
     }
 
 
-@router.post("/associations/{assoc_id}/roster/provision-accounts")
-def provision_accounts(
+@router.post("/associations/{assoc_id}/roster/open-accounts")
+def open_accounts(
     assoc_id: uuid.UUID,
     membership=Depends(require_role(Role.treasurer)),
     session: Session = Depends(get_session),
 ):
-    """Issue an Ecobank virtual account per roster member (spec: upload → provision).
+    """Open an Ecobank account for every roster member who lacks one.
 
-    Idempotent: already-provisioned members are skipped, so re-running after a
-    partial batch finishes the job. In mock mode every member receives a
-    deterministic demo account number instantly.
+    Idempotent: already-``opened``/``opening_pending`` members are skipped, so
+    re-running after a partial batch finishes the job. In mock mode each member
+    receives a deterministic demo account number instantly.
     """
-    result = roster_service.provision_accounts(
-        session, assoc_id, actor_id=membership.user_id
+    records = session.exec(
+        select(MemberRecord).where(MemberRecord.association_id == assoc_id)
+    ).all()
+    opened = 0
+    pending = 0
+    for record in records:
+        result = roster_service.open_account(
+            session, record, actor_id=membership.user_id
+        )
+        if result["skipped"]:
+            continue
+        if result["account_status"] == "opened":
+            opened += 1
+        else:
+            pending += 1
+    session.commit()
+    return {"ok": True, "opened": opened, "pending": pending, "total": len(records)}
+
+
+def _member_for_treasurer(
+    session: Session, member_record_id: uuid.UUID, user: User
+) -> tuple[MemberRecord, Membership]:
+    """Resolve a roster member and verify the caller is treasurer in its association.
+
+    These routes are keyed by member-record id (not ``assoc_id``), so they cannot
+    use ``require_role`` — whose dependency expects the ``assoc_id`` path param.
+    """
+    record = session.get(MemberRecord, member_record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Roster member not found")
+    membership = role_in_association(session, user, record.association_id)
+    if membership is None or membership.role is not Role.treasurer:
+        raise HTTPException(status_code=403, detail="Requires treasurer role")
+    return record, membership
+
+
+@router.post("/member-records/{member_record_id}/open-account")
+def open_account(
+    member_record_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    """Open one roster member's Ecobank account (Account Opening Service)."""
+    record, membership = _member_for_treasurer(session, member_record_id, user)
+    result = roster_service.open_account(session, record, actor_id=membership.user_id)
+    session.commit()
+    return {"ok": True, **result}
+
+
+@router.post("/member-records/{member_record_id}/authorize-direct-debit")
+def authorize_direct_debit(
+    member_record_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    """Register a member's direct-debit mandate (Payment From Ecobank Account)."""
+    record, membership = _member_for_treasurer(session, member_record_id, user)
+    result = roster_service.authorize_direct_debit(
+        session, record, actor_id=membership.user_id
     )
     session.commit()
     return {"ok": True, **result}

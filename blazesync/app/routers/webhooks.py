@@ -1,19 +1,19 @@
 """Ecobank Notification Service webhook — verify first, then process.
 
 Never trust an incoming payload: the HMAC-SHA512 signature must match before
-anything touches the ledger. Three event families this build cares about:
+anything touches the ledger. Event families this build cares about:
 
-- ``collection.confirmed``   → flip the app-initiated collection payment
-- ``transfer.completed``     → mark an executed disbursement complete
-- ``virtual_account.credit`` → money landed in a member's virtual account —
-  attribute it to that member by the account number and reconcile it onto
-  the ledger, optionally completing a matching pending dues payment.
+- ``collection.confirmed``     → flip the app-initiated collection payment
+- ``transfer.completed``       → mark an executed disbursement complete
+- ``direct_debit.confirmed``   → settle a pending direct-debit dues pull
+- ``account.opened``           → complete an async Account Opening request
+- ``mandate.activated``        → complete an async direct-debit mandate
 """
 
 import json
 import logging
+import uuid
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlmodel import Session, select
@@ -23,7 +23,6 @@ from ..db import get_session
 from ..ecobank import verify_webhook_signature
 from ..live import hub
 from ..models import (
-    LedgerEntry,
     LedgerType,
     Payment,
     PaymentStatus,
@@ -57,157 +56,157 @@ async def ecobank_notification(
         raise HTTPException(status_code=400, detail="Malformed JSON") from exc
 
     event_type = event.get("type")
-    ref = event.get("transactionRef")
-    if not ref:
-        raise HTTPException(status_code=400, detail="Missing transactionRef")
 
     if event_type == "collection.confirmed":
-        return await _handle_collection_confirmed(session, event, ref)
+        return await _handle_collection_confirmed(session, event, _require_ref(event))
     if event_type == "transfer.completed":
-        return await _handle_transfer_completed(session, event, ref)
-    if event_type == "virtual_account.credit":
-        return await _handle_virtual_account_credit(session, event, ref)
+        return await _handle_transfer_completed(session, event, _require_ref(event))
+    if event_type == "direct_debit.confirmed":
+        return await _handle_direct_debit_confirmed(session, event, _require_ref(event))
+    if event_type == "account.opened":
+        return await _handle_account_opened(session, event)
+    if event_type == "mandate.activated":
+        return await _handle_mandate_activated(session, event)
 
     # Unknown types are acknowledged but ignored — forward compatibility.
     return {"ok": True, "ignored": event_type or "unknown"}
 
 
-async def _handle_virtual_account_credit(session: Session, event: dict, ref: str) -> dict:
-    """Money landed in a member's virtual account — attribute and reconcile it.
+def _require_ref(event: dict) -> str:
+    ref = event.get("transactionRef") or event.get("reference")
+    if not ref:
+        raise HTTPException(status_code=400, detail="Missing transactionRef")
+    return str(ref)
 
-    The member's VA is the attribution key (spec: "every member gets a unique
-    virtual account"), so this handler needs no payment row to exist first.
-    Matching that member's pending payment for the association's active cycle
-    is best-effort: only an exact-amount, same-member, pending payment flips
-    to success; otherwise the credit lands directly on the ledger as an
-    attributed inflow that can never be lost.
+
+async def _handle_direct_debit_confirmed(session: Session, event: dict, ref: str) -> dict:
+    """A direct-debit pull settled — flip the pending payment and post to ledger.
+
+    The app already recorded a ``pending`` Payment when it initiated the pull
+    (Payment From Ecobank Account); this event confirms settlement. Idempotent:
+    a payment already ``success`` is acknowledged without double-posting.
     """
-    from ..models import (
-        Association,
-        CycleStatus,
-        DuesCycle,
-        MemberRecord,
-        PaymentChannel,
-    )
-
-    account_number = (
-        event.get("accountNumber")
-        or event.get("virtualAccountNo")
-        or event.get("creditAccountNumber")
-    )
-    if not account_number:
-        raise HTTPException(status_code=400, detail="Missing virtual account number")
-    amount = event.get("amount")
-    if amount in (None, ""):
-        raise HTTPException(status_code=400, detail="Missing credit amount")
-    try:
-        credit = Decimal(str(amount))
-    except InvalidOperation as exc:
-        raise HTTPException(status_code=400, detail="Invalid credit amount") from exc
-    if credit <= 0:
-        raise HTTPException(status_code=400, detail="Credit amount must be positive")
-
-    record = session.exec(
-        select(MemberRecord).where(MemberRecord.virtual_account_ref == account_number)
+    payment = session.exec(
+        select(Payment).where(Payment.ecobank_transaction_ref == ref)
     ).first()
-    if record is None:
-        logger.info("VA credit for unknown account %s — acknowledging", account_number)
-        return {"ok": True, "matched": False}
-    association = session.get(Association, record.association_id)
-    if association is None:  # defensive: roster rows always belong to an association
+    if payment is None:
+        logger.info("webhook for unknown direct-debit ref %s — acknowledging", ref)
         return {"ok": True, "matched": False}
 
-    # Optional idempotence hook: Ecobank may redeliver the same notification;
-    # an identical (ref, account, amount) credit already on the ledger is a no-op.
-    existing_note = f"Virtual account credit: {ref}"
-    prior = session.exec(
-        select(LedgerEntry).where(
-            LedgerEntry.association_id == association.id,
-            LedgerEntry.reason_or_category == existing_note,
-            LedgerEntry.amount == credit,
-        )
-    ).first()
-    if prior is not None:
+    if payment.status is PaymentStatus.success:
         return {"ok": True, "matched": True, "duplicate": True}
 
-    matched_payment: Payment | None = None
-    cycle = session.exec(
-        select(DuesCycle)
-        .where(
-            DuesCycle.association_id == association.id,
-            DuesCycle.status == CycleStatus.active,
-        )
-        .order_by(DuesCycle.created_at.desc())
-    ).first()
-    if cycle is not None:
-        matched_payment = session.exec(
-            select(Payment)
-            .where(
-                Payment.member_record_id == record.id,
-                Payment.dues_cycle_id == cycle.id,
-                Payment.status == PaymentStatus.pending,
-                Payment.amount == credit,
-                Payment.paid_via == PaymentChannel.blaze,
-            )
-            .order_by(Payment.timestamp.desc())
-        ).first()
-
-    if matched_payment is not None:
-        matched_payment.status = PaymentStatus.success
-        matched_payment.ecobank_transaction_ref = ref
-        matched_payment.timestamp = _event_time(event, matched_payment.timestamp)
-        session.add(matched_payment)
-        receipts_service.generate_receipt(session, matched_payment)
-        entry = ledger_service.append_entry(
-            session,
-            association_id=association.id,
-            type_=LedgerType.inflow,
-            amount=credit,
-            reason_or_category=f"Dues (VA credit): {cycle.title}",
-            linked_payment_id=matched_payment.id,
-        )
-        payment_id = str(matched_payment.id)
-        narration = cycle.title
-    else:
-        entry = ledger_service.append_entry(
-            session,
-            association_id=association.id,
-            type_=LedgerType.inflow,
-            amount=credit,
-            reason_or_category=existing_note,
-        )
-        payment_id = None
-        narration = "virtual account credit"
-
+    payment.status = PaymentStatus.success
+    payment.timestamp = _event_time(event, payment.timestamp)
+    session.add(payment)
+    cycle = payment.dues_cycle
+    receipts_service.generate_receipt(session, payment)
+    entry = ledger_service.append_entry(
+        session,
+        association_id=cycle.association_id,
+        type_=LedgerType.inflow,
+        amount=payment.amount,
+        reason_or_category=f"Dues (direct debit): {cycle.title}",
+        linked_payment_id=payment.id,
+    )
     audit(
         session,
-        action="virtual_account_credit",
+        action="webhook_direct_debit_confirmed",
         actor_id=None,
         metadata={
-            "association_id": str(association.id),
-            "member_record_id": str(record.id),
-            "account_number": account_number,
-            "amount": str(credit),
+            "payment_id": str(payment.id),
             "ecobank_ref": ref,
-            "payment_id": payment_id,
             "ledger_entry_id": str(entry.id),
         },
     )
     session.commit()
     await hub.broadcast(
-        association.id,
+        cycle.association_id,
         {
             "event": "ledger_entry",
             "ledger_entry_id": str(entry.id),
-            "payment_id": payment_id,
+            "payment_id": str(payment.id),
             "type": "inflow",
-            "amount": str(credit),
-            "member": record.name,
-            "cycle": narration,
+            "amount": str(payment.amount),
+            "cycle": cycle.title,
             "at": utcnow().isoformat(),
         },
     )
-    return {"ok": True, "matched": True, "payment_id": payment_id}
+    return {"ok": True, "matched": True, "payment_id": str(payment.id)}
+
+
+async def _handle_account_opened(session: Session, event: dict) -> dict:
+    """Complete an asynchronously-provisioned Account Opening request.
+
+    Attribution: the provider echoes our ``customerReference`` (``assoc:record``)
+    and/or the new account number. Only a matching member left in
+    ``opening_pending`` is completed — a synchronous open is a no-op.
+    """
+    from ..models import AccountOpeningStatus, MemberRecord
+
+    account_number = event.get("accountNumber") or event.get("accountNo")
+    customer_ref = event.get("customerReference") or event.get("reference")
+    record: MemberRecord | None = None
+    if customer_ref and ":" in str(customer_ref):
+        try:
+            _, record_id = str(customer_ref).split(":", 1)
+            record = session.get(MemberRecord, uuid.UUID(record_id))
+        except (ValueError, TypeError):
+            record = None
+    if record is None and account_number:
+        record = session.exec(
+            select(MemberRecord).where(
+                MemberRecord.linked_account_ref == account_number
+            )
+        ).first()
+    if record is None:
+        return {"ok": True, "matched": False}
+
+    if account_number:
+        record.linked_account_ref = str(account_number)
+    record.account_status = AccountOpeningStatus.opened
+    session.add(record)
+    audit(
+        session,
+        action="webhook_account_opened",
+        actor_id=None,
+        metadata={
+            "member_record_id": str(record.id),
+            "account_ref": record.linked_account_ref,
+        },
+    )
+    session.commit()
+    return {"ok": True, "matched": True, "member_record_id": str(record.id)}
+
+
+async def _handle_mandate_activated(session: Session, event: dict) -> dict:
+    """Flip a pending direct-debit mandate to active after member confirmation."""
+    from ..models import DirectDebitMandate, DirectDebitStatus
+
+    mandate_ref = event.get("mandateReference") or event.get("mandateRef") or event.get("reference")
+    if not mandate_ref:
+        raise HTTPException(status_code=400, detail="Missing mandateReference")
+    mandate = session.exec(
+        select(DirectDebitMandate).where(DirectDebitMandate.mandate_ref == str(mandate_ref))
+    ).first()
+    if mandate is None:
+        return {"ok": True, "matched": False}
+    if mandate.status is DirectDebitStatus.active:
+        return {"ok": True, "matched": True, "duplicate": True}
+    mandate.status = DirectDebitStatus.active
+    mandate.authorized_at = _event_time(event, utcnow())
+    session.add(mandate)
+    audit(
+        session,
+        action="webhook_mandate_activated",
+        actor_id=None,
+        metadata={
+            "member_record_id": str(mandate.member_record_id),
+            "mandate_ref": mandate.mandate_ref,
+        },
+    )
+    session.commit()
+    return {"ok": True, "matched": True, "mandate_ref": mandate.mandate_ref}
 
 
 async def _handle_collection_confirmed(session: Session, event: dict, ref: str) -> dict:

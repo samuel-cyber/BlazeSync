@@ -13,6 +13,8 @@ from ..db import get_session
 from ..deps import get_current_user, require_role, role_in_association
 from ..models import (
     CycleStatus,
+    DirectDebitMandate,
+    DirectDebitStatus,
     DuesCycle,
     MemberRecord,
     Membership,
@@ -144,11 +146,13 @@ def pay(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    """Pay dues via the Ecobank Collection Service (mock-mode aware).
+    """Pay dues via an Ecobank direct-debit pull against the member's mandate.
 
-    The caller must be a claimed roster member. On success the receipt is
-    generated and the ledger entry appended in the same transaction; the new
-    entry is then broadcast live.
+    The caller must be a claimed roster member with an ACTIVE direct-debit
+    mandate (Payment From Ecobank Account). A synchronous settlement yields the
+    receipt + ledger entry in the same transaction and broadcasts live; an
+    asynchronous provider confirmation records a pending payment that the
+    notification webhook completes.
     """
     cycle = session.get(DuesCycle, cycle_id)
     if cycle is None:
@@ -166,6 +170,19 @@ def pay(
             "claim your invite first",
         )
 
+    mandate = session.exec(
+        select(DirectDebitMandate).where(
+            DirectDebitMandate.member_record_id == record.id,
+            DirectDebitMandate.status == DirectDebitStatus.active,
+        )
+    ).first()
+    if mandate is None or not record.linked_account_ref:
+        raise HTTPException(
+            status_code=409,
+            detail="No active direct-debit mandate for your account — "
+            "open your Ecobank account and authorize direct debit first",
+        )
+
     # Per-level pricing overrides the flat amount when the cycle defines it
     # for the payer's level (spec 4.2).
     per_level = cycle.per_level or {}
@@ -179,6 +196,8 @@ def pay(
         amount=amount,
         paid_via=body.paid_via,
         idempotency_key=body.idempotency_key.strip(),
+        mandate_ref=mandate.mandate_ref,
+        account_ref=record.linked_account_ref,
     )
     audit(
         session,

@@ -3,9 +3,10 @@
 One module to change if endpoint details shift. All calls retry with
 exponential backoff (sandbox environments are flaky). When sandbox
 credentials are absent (``settings.ecobank_mock_mode``), the client returns
-deterministic mock responses so the entire product flow — collection,
-account enquiry, local bank payment, virtual account issuance, webhook
-notifications — works offline for development and demos.
+deterministic mock responses so the entire product flow — account opening,
+direct-debit mandate authorization, direct-debit collection, account enquiry,
+local bank payment, webhook notifications — works offline for development
+and demos.
 """
 
 import hashlib
@@ -50,9 +51,37 @@ class TransferResult:
 
 
 @dataclass
-class VirtualAccountResult:
+class AccountOpeningResult:
+    """Outcome of an Account Opening Service request.
+
+    ``status`` is ``"opened"`` when the account is live immediately, or
+    ``"opening_pending"`` when the sandbox confirms asynchronously (a
+    Notification Service event completes it later).
+    """
+
     success: bool
     account_number: str | None
+    status: str
+    message: str
+
+
+@dataclass
+class MandateResult:
+    """Outcome of a direct-debit mandate authorization."""
+
+    success: bool
+    mandate_ref: str | None
+    status: str  # "active" | "pending" | "revoked"
+    message: str
+
+
+@dataclass
+class DirectDebitResult:
+    """Outcome of a Payment-From-Ecobank-Account (direct debit) pull."""
+
+    success: bool
+    transaction_ref: str | None
+    status: str  # "success" | "pending" | "failed"
     message: str
 
 
@@ -67,7 +96,7 @@ class EcobankClient:
             self._client = httpx.Client(timeout=settings.ECOBANK_TIMEOUT_SECONDS)
         return self._client
 
-    def _post_with_retry(self, url: str, payload: dict) -> dict:
+    def _post_with_retry(self, url: str, payload: dict, service_code: str = "") -> dict:
         if settings.ecobank_mock_mode:
             raise RuntimeError("live call attempted in mock mode")  # guarded by callers
         delay = settings.ECOBANK_RETRY_BASE_DELAY
@@ -78,7 +107,7 @@ class EcobankClient:
                     url,
                     json=payload,
                     headers={
-                        "Authorization": f"Bearer {self._bearer_token()}",
+                        "Authorization": f"Bearer {self._bearer_token(service_code)}",
                         "Origin": settings.ECOBANK_ORIGIN,
                         "Content-Type": "application/json",
                         "Accept": "application/json",
@@ -103,24 +132,35 @@ class EcobankClient:
             f"Ecobank call failed after {settings.ECOBANK_MAX_RETRIES} attempts: {last_error}"
         )
 
-    def _bearer_token(self) -> str:
-        """Bearer token via the Authentication service (cached in-process)."""
-        cached = getattr(self, "_token_cache", None)
-        if cached:
-            return cached
+    def _bearer_token(self, service_code: str = "") -> str:
+        """Bearer token via the Authentication service (cached per service code).
+
+        Ecobank scopes tokens to the service they will be used against, so the
+        cache key includes the service code. Omitted service code keeps the
+        legacy single-token behaviour used by Account Enquiry and transfers.
+        """
+        cache: dict[str, str] = getattr(self, "_token_cache", None) or {}
+        if service_code and cache.get(service_code):
+            return cache[service_code]
+        if not service_code and cache.get(""):
+            return cache[""]
+        payload: dict = {
+            "userId": settings.ECOBANK_USER_ID,
+            "password": settings.ECOBANK_PASSWORD,
+        }
+        if service_code:
+            payload["serviceCode"] = service_code
         response = self._http().post(
             f"{settings.ECOBANK_BASE_URL}/api/v1/authentication/token",
-            json={
-                "userId": settings.ECOBANK_USER_ID,
-                "password": settings.ECOBANK_PASSWORD,
-            },
+            json=payload,
             headers={"Origin": settings.ECOBANK_ORIGIN},
         )
         response.raise_for_status()
         token = response.json().get("accessToken") or response.json().get("access_token")
         if not token:
             raise EcobankError("authentication response contained no token")
-        self._token_cache = token
+        cache[service_code] = token
+        self._token_cache = cache
         return token
 
     # --- services ------------------------------------------------------------
@@ -235,56 +275,181 @@ class EcobankClient:
             message=str(data.get("responseMessage") or data.get("message") or ""),
         )
 
-    # --- mock helpers ----------------------------------------------------------
-
-    def create_virtual_account(
-        self, member_name: str, customer_ref: str, association_id: uuid.UUID
-    ) -> VirtualAccountResult:
-        """Issue a dedicated Ecobank virtual account for one roster member.
+    def open_account(
+        self,
+        member_name: str,
+        customer_ref: str,
+        product_code: str = "SAVINGS",
+    ) -> AccountOpeningResult:
+        """Account Opening Service: open a real Ecobank account for a member.
 
         Mock mode: derives a deterministic, collision-free account number from
-        the association + member so demo import scripts stay reproducible.
+        the member reference so demo flows stay reproducible. The sandbox may
+        confirm synchronously (status ``opened``) or asynchronously (status
+        ``opening_pending``, completed later by a notification event).
         """
         if settings.ecobank_mock_mode:
-            digest = hashlib.sha256(
-                f"{association_id}:{customer_ref}".encode("utf-8")
-            ).hexdigest()
-            # 0x11 prefix keeps it a valid-looking Nigerian bank account length.
-            account_number = "11" + digest[:8].upper()
-            return VirtualAccountResult(
-                success=True, account_number=account_number, message="mock VA issued"
+            digest = hashlib.sha256(customer_ref.encode("utf-8")).hexdigest()
+            account_number = "22" + digest[:8].upper()
+            return AccountOpeningResult(
+                success=True,
+                account_number=account_number,
+                status="opened",
+                message="mock account opened",
             )
         request_id = hashing.new_request_id()
-        rt = hashing.request_token(request_id, "VIRTUAL_ACCT")
+        rt = hashing.request_token(request_id, "ACCOUNT_OPENING")
         payload = {
             "requestId": request_id,
             "requestToken": rt,
-            "secureHash": hashing.virtual_account_hash(request_id, rt, member_name, customer_ref),
+            "secureHash": hashing.account_opening_hash(
+                request_id, rt, member_name, customer_ref, product_code
+            ),
             "customerName": member_name,
             "customerReference": customer_ref,
+            "productCode": product_code,
             "clientId": settings.ECOBANK_CLIENT_ID,
             "affiliateCode": settings.ECOBANK_AFFILIATE_CODE,
             "sourceCode": settings.ECOBANK_SOURCE_CODE,
         }
         try:
             data = self._post_with_retry(
-                f"{settings.ECOBANK_BASE_URL}/api/v1/virtual-accounts", payload
+                f"{settings.ECOBANK_BASE_URL}/api/v1/accounts/open",
+                payload,
+                service_code="ACCOUNT_OPENING",
             )
         except EcobankError as exc:
-            logger.warning("virtual account issuance failed for %s: %s", customer_ref, exc)
-            return VirtualAccountResult(
-                success=False, account_number=None, message="provider unavailable"
+            logger.warning("account opening failed for %s: %s", customer_ref, exc)
+            return AccountOpeningResult(
+                success=False, account_number=None, status="none", message="provider unavailable"
             )
         success = str(data.get("responseCode")) == "00" or data.get("status") == "SUCCESS"
-        if not success:
-            logger.warning(
-                "virtual account issuance rejected for %s: %s", customer_ref, data.get("message")
-            )
-        return VirtualAccountResult(
+        account_number = data.get("accountNumber") or data.get("accountNo")
+        # Sandbox may acknowledge synchronously but provision asynchronously.
+        pending = success and not account_number
+        return AccountOpeningResult(
             success=success,
-            account_number=data.get("accountNumber") or data.get("virtualAccountNo"),
+            account_number=account_number,
+            status=("opening_pending" if pending else ("opened" if success else "none")),
             message=str(data.get("responseMessage") or data.get("message") or ""),
         )
+
+    def authorize_direct_debit(
+        self,
+        account_ref: str,
+        reference: str,
+    ) -> MandateResult:
+        """Payment From Ecobank Account: register a member's debit mandate.
+
+        Mock mode: issues a deterministic mandate that starts ``active`` so the
+        collection flow is exercisable offline. A live sandbox may instead
+        return ``pending`` until the member confirms via Ecobank's channel and
+        a notification event flips it to ``active``.
+        """
+        if settings.ecobank_mock_mode:
+            ref = "MOCK-MAN-" + hashlib.sha256(reference.encode()).hexdigest()[:16].upper()
+            return MandateResult(
+                success=True, mandate_ref=ref, status="active", message="mock mandate active"
+            )
+        request_id = hashing.new_request_id()
+        rt = hashing.request_token(request_id, "DIRECTDEBIT")
+        payload = {
+            "requestId": request_id,
+            "requestToken": rt,
+            "secureHash": hashing.secure_hash(
+                request_id, "DIRECTDEBIT", rt, account_ref, reference
+            ),
+            "accountNo": account_ref,
+            "customerReference": reference,
+            "clientId": settings.ECOBANK_CLIENT_ID,
+            "affiliateCode": settings.ECOBANK_AFFILIATE_CODE,
+            "sourceCode": settings.ECOBANK_SOURCE_CODE,
+        }
+        try:
+            data = self._post_with_retry(
+                f"{settings.ECOBANK_BASE_URL}/api/v1/direct-debit/mandate",
+                payload,
+                service_code="DIRECTDEBIT",
+            )
+        except EcobankError as exc:
+            logger.warning("mandate authorization failed for %s: %s", account_ref, exc)
+            return MandateResult(
+                success=False, mandate_ref=None, status="pending", message="provider unavailable"
+            )
+        success = str(data.get("responseCode")) == "00" or data.get("status") == "SUCCESS"
+        mandate_ref = data.get("mandateReference") or data.get("mandateRef")
+        status = "active" if (success and data.get("status") != "PENDING") else "pending"
+        if not success:
+            status = "pending"
+        return MandateResult(
+            success=success,
+            mandate_ref=mandate_ref,
+            status=status,
+            message=str(data.get("responseMessage") or data.get("message") or ""),
+        )
+
+    def initiate_direct_debit_payment(
+        self,
+        mandate_ref: str,
+        account_ref: str,
+        amount: Decimal,
+        narration: str,
+        idempotency_key: str,
+    ) -> DirectDebitResult:
+        """Payment From Ecobank Account: pull dues using the member's mandate.
+
+        Mock mode: succeeds deterministically and derives a stable ref from the
+        idempotency key, so retries map to the same transaction. A live sandbox
+        may return ``pending`` (async confirmation via notification webhook)
+        rather than settling immediately.
+        """
+        if settings.ecobank_mock_mode:
+            ref = "MOCK-DD-" + hashlib.sha256(idempotency_key.encode()).hexdigest()[:16].upper()
+            return DirectDebitResult(
+                success=True,
+                transaction_ref=ref,
+                status="success",
+                message="mock direct debit approved",
+            )
+        request_id = hashing.new_request_id()
+        rt = hashing.request_token(request_id, "DIRECTDEBIT")
+        amount_string = f"{amount:.2f}"
+        payload = {
+            "requestId": request_id,
+            "requestToken": rt,
+            "secureHash": hashing.direct_debit_hash(
+                request_id, rt, mandate_ref, account_ref, amount_string, "NGN"
+            ),
+            "mandateReference": mandate_ref,
+            "accountNo": account_ref,
+            "amount": amount_string,
+            "currency": "NGN",
+            "narration": narration,
+            "clientId": settings.ECOBANK_CLIENT_ID,
+            "affiliateCode": settings.ECOBANK_AFFILIATE_CODE,
+            "sourceCode": settings.ECOBANK_SOURCE_CODE,
+        }
+        data = self._post_with_retry(
+            f"{settings.ECOBANK_BASE_URL}/api/v1/direct-debit/payment",
+            payload,
+            service_code="DIRECTDEBIT",
+        )
+        response_code = str(data.get("responseCode"))
+        provider_status = str(data.get("status") or "").upper()
+        if response_code == "00" or provider_status == "SUCCESS":
+            status = "success"
+        elif provider_status in ("PENDING", "PROCESSING"):
+            status = "pending"
+        else:
+            status = "failed"
+        return DirectDebitResult(
+            success=status in ("success", "pending"),
+            transaction_ref=data.get("transactionRef") or data.get("reference"),
+            status=status,
+            message=str(data.get("responseMessage") or data.get("message") or ""),
+        )
+
+    # --- mock helpers ----------------------------------------------------------
 
     def _mock_balance(self, account_ref: str) -> BalanceResult:
         """Deterministic balance derived from the account ref + configured drift.

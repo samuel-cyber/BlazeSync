@@ -81,14 +81,24 @@ def pay_dues(
     amount: Decimal,
     paid_via: PaymentChannel,
     idempotency_key: str,
+    mandate_ref: str,
+    account_ref: str,
 ) -> Payment:
-    """Orchestrate a dues payment through the Ecobank Collection Service."""
+    """Orchestrate a dues payment as an Ecobank direct-debit pull.
+
+    The member's ACTIVE ``DirectDebitMandate`` is resolved by the caller and
+    passed in; the pull is initiated against that mandate (Payment From
+    Ecobank Account Service). A provider that settles synchronously yields a
+    ``success`` payment with receipt + ledger entry; a provider that confirms
+    asynchronously yields a ``pending`` payment with no receipt or ledger entry
+    until the notification webhook confirms it.
+    """
     # 1. Idempotency: same key → return the original result, never re-process.
     existing = session.exec(
         select(Payment).where(Payment.idempotency_key == idempotency_key)
     ).first()
     if existing:
-        if existing.status == PaymentStatus.success:
+        if existing.status in (PaymentStatus.success, PaymentStatus.pending):
             return existing
         # a previous attempt failed — allow retry with the same key
         session.delete(existing)
@@ -99,39 +109,54 @@ def pay_dues(
     if member_record.association_id != cycle.association_id:
         raise HTTPException(status_code=400, detail="Member is not on this association's roster")
 
-    # 2. Ecobank Collection Service (mock-mode aware).
+    # 2. Ecobank Payment From Ecobank Account (direct debit, mock-mode aware).
     try:
-        result = ecobank_client.collect(
-            account_ref=_treasury_ref(cycle),
+        result = ecobank_client.initiate_direct_debit_payment(
+            mandate_ref=mandate_ref,
+            account_ref=account_ref,
             amount=amount,
             narration=f"{cycle.title} — {member_record.name}",
             idempotency_key=idempotency_key,
-            payer_ref=_payer_ref(member_record),
         )
     except EcobankError as exc:
-        logger.warning("collection failed for key %s: %s", idempotency_key, exc)
+        logger.warning("direct debit failed for key %s: %s", idempotency_key, exc)
         raise HTTPException(
             status_code=502, detail="Payment provider unavailable, try again"
         ) from exc
 
-    status = PaymentStatus.success if result.success else PaymentStatus.failed
+    if not result.success:
+        raise HTTPException(status_code=402, detail=f"Payment declined: {result.message}")
+
+    # 3. Pending provider-side settlement: record the attempt, no money yet.
+    if result.status == "pending":
+        payment = Payment(
+            dues_cycle_id=cycle.id,
+            member_record_id=member_record.id,
+            amount=amount,
+            paid_via=paid_via,
+            ecobank_transaction_ref=result.transaction_ref,
+            status=PaymentStatus.pending,
+            idempotency_key=idempotency_key,
+            timestamp=utcnow(),
+        )
+        session.add(payment)
+        session.flush()
+        return payment
+
+    # 4. Settled synchronously: receipt + ledger entry, same DB transaction.
     payment = Payment(
         dues_cycle_id=cycle.id,
         member_record_id=member_record.id,
         amount=amount,
         paid_via=paid_via,
         ecobank_transaction_ref=result.transaction_ref,
-        status=status,
+        status=PaymentStatus.success,
         idempotency_key=idempotency_key,
         timestamp=utcnow(),
     )
     session.add(payment)
     session.flush()
 
-    if not result.success:
-        raise HTTPException(status_code=402, detail=f"Payment declined: {result.message}")
-
-    # 3. Receipt + 4. Ledger entry — same DB transaction, all-or-nothing.
     receipts_service.generate_receipt(session, payment)
     entry = ledger_service.append_entry(
         session,
@@ -145,25 +170,6 @@ def pay_dues(
     # 5. Live broadcast happens after commit (router calls broadcast_payment).
     payment._ledger_entry_id = entry.id  # type: ignore[attr-defined]
     return payment
-
-
-def _treasury_ref(cycle: DuesCycle) -> str:
-    assoc = cycle.association
-    if not assoc.treasury_account_ref:
-        raise HTTPException(
-            status_code=409, detail="Association has not linked its Ecobank account yet"
-        )
-    return assoc.treasury_account_ref
-
-
-def _payer_ref(member_record: MemberRecord) -> str:
-    # A claimed member pays from their linked Blaze/Ecobank account; an
-    # unclaimed roster member can still pay against their roster identity.
-    return (
-        member_record.user.linked_account_ref
-        if member_record.user and member_record.user.linked_account_ref
-        else member_record.email
-    )
 
 
 def build_payment_payload(
