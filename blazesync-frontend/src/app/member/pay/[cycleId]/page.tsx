@@ -22,7 +22,7 @@ const METHODS: { id: Method; label: string; detail: string; icon: typeof Wallet 
 
 export default function PayPage({ params }: PageProps<"/member/pay/[cycleId]">) {
   const { cycleId } = use(params);
-  const { db, session, payDues } = useDb();
+  const { db, session, mode, payDues } = useDb();
   const now = useNow();
   const [method, setMethod] = useState<Method>("blaze");
   const [phase, setPhase] = useState<Phase>("choose");
@@ -79,6 +79,31 @@ export default function PayPage({ params }: PageProps<"/member/pay/[cycleId]">) 
         <PageHeader title={`Pay ${assoc.shortName}`} back={{ href: "/member", label: "Home" }} />
         <Callout tone="warn" title="Payments are paused for this association">
           Its bank account was disconnected, so there&apos;s nowhere safe to send your money. Nothing is due from you until it&apos;s reconnected. Your treasurer has been told.
+        </Callout>
+      </div>
+    );
+  }
+
+  // Live mode only: the real rails need an Ecobank account + an active mandate
+  // before a dues pull can succeed. (Demo records start un-opened by design, so
+  // a hard guard there would block the whole demo pay flow.)
+  const needsSetup = mode === "live" && (record.accountStatus !== "opened" || record.mandateStatus !== "active");
+  if (needsSetup && phase !== "done" && phase !== "failed") {
+    return (
+      <div className="max-w-xl space-y-5">
+        <PageHeader title={`Pay ${assoc.shortName}`} back={{ href: "/member", label: "Home" }} />
+        <Callout
+          tone="warn"
+          title="Set up your direct debit first"
+          action={
+            <ButtonLink href="/member/account" size="sm">
+              Open the account page
+            </ButtonLink>
+          }
+        >
+          {record.accountStatus !== "opened"
+            ? "Your treasurer needs to open your Ecobank account before you can pay dues from the app."
+            : "Your account is open. Authorize the direct-debit mandate from your account page, and dues will be paid straight from it."}
         </Callout>
       </div>
     );
@@ -178,10 +203,16 @@ export default function PayPage({ params }: PageProps<"/member/pay/[cycleId]">) 
 
       {phase === "failed" && (
         <div className="space-y-5">
-          <Callout tone="danger" role="alert" title="Ecobank declined the payment. Nothing was taken from you.">
-            {failure === "insufficient_funds"
-              ? `Your Blaze account doesn't have ${naira(amount + fee)} available. Top it up, or pay another way.`
-              : "The bank didn't say why. Try again in a minute, or pay another way."}
+          <Callout
+            tone={failure === "no_mandate" ? "warn" : "danger"}
+            role="alert"
+            title={failure === "no_mandate" ? "Your direct debit isn't active yet" : "Ecobank declined the payment. Nothing was taken from you."}
+          >
+            {failure === "no_mandate"
+              ? "Open your Ecobank account and authorize a direct-debit mandate, then come back to pay."
+              : failure === "insufficient_funds"
+                ? `Your Blaze account doesn't have ${naira(amount + fee)} available. Top it up, or pay another way.`
+                : "The bank didn't say why. Try again in a minute, or pay another way."}
           </Callout>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button

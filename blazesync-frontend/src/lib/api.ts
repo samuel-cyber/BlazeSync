@@ -90,6 +90,7 @@ function bucket(status: number, detail: string): string {
   if (status === 402) return "payment_declined";
   if (status === 404) return "not_found";
   if (status === 409) {
+    if (/mandate|open your ecobank account|authorize direct debit/i.test(detail)) return "no_mandate";
     if (/already.*member|already claimed|already voted|already a member/i.test(detail)) return "already";
     if (/closed/i.test(detail)) return "cycle_closed";
     return "conflict";

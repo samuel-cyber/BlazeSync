@@ -237,7 +237,7 @@ function toReceipt(w: { payment_id: string; amount: string; paid_via: string; st
   };
 }
 
-function toRosterItem(w: { id: string; name: string; matric_number: string | null; email: string; phone: string | null; claimed: boolean; claimed_by: string | null; level?: string; linked_account_ref?: string | null; account_status?: string; mandate_status?: string | null; invite_status: string; paid: boolean | null }): MemberRecord {
+function toRosterItem(w: { id: string; name: string; matric_number: string | null; email: string; phone: string | null; claimed: boolean; claimed_by: string | null; level?: string; linked_account_ref?: string | null; account_status?: string; mandate_status?: string | null; mandate_ref?: string | null; invite_status: string; paid: boolean | null }): MemberRecord {
   return {
     id: w.id,
     associationId: "",
@@ -257,6 +257,7 @@ function toRosterItem(w: { id: string; name: string; matric_number: string | nul
     accountStatus: (w.account_status ?? "none") as MemberRecord["accountStatus"],
     linkedAccountRef: w.linked_account_ref ?? null,
     mandateStatus: (w.mandate_status ?? null) as MemberRecord["mandateStatus"],
+    mandateRef: w.mandate_ref ?? null,
   };
 }
 
@@ -704,6 +705,7 @@ function useStoreValue() {
           if (e instanceof ApiError) {
             if (e.code === "payment_declined") return { ok: false as const, error: "insufficient_funds" };
             if (e.code === "cycle_closed") return { ok: false as const, error: "cycle_closed" };
+            if (e.code === "no_mandate") return { ok: false as const, error: "no_mandate" };
             if (e.status === 409) return { ok: false as const, error: "already_paid" };
           }
           return { ok: false as const, error: "network" };
@@ -820,6 +822,7 @@ function useStoreValue() {
         accountStatus: "none",
         linkedAccountRef: null,
         mandateStatus: null,
+        mandateRef: null,
       });
       audit(draft, input.associationId, userId, "invite_claimed", `${input.name.trim()} joined with the association code`);
     });
@@ -881,6 +884,7 @@ function useStoreValue() {
           accountStatus: "none",
           linkedAccountRef: null,
           mandateStatus: null,
+          mandateRef: null,
         });
       }
       audit(draft, associationId, session!.userId, "roster_uploaded", `Uploaded ${rows.length} members from ${fileName}`);
@@ -911,6 +915,95 @@ function useStoreValue() {
       audit(draft, associationId, session!.userId, "invites_sent", `Sent ${recordIds.length} invites by ${channels.join(" and ").replace("sms", "SMS")}`);
     });
     return { ok: true, value: recordIds.length };
+  }
+
+  // ---- Ecobank account opening + direct-debit mandates (the money rails) ----
+
+  /** Bulk-open Ecobank accounts for every \"none\" member on the roster. */
+  async function openAccounts(associationId: string): Promise<Result<{ opened: number; pending: number; total: number }>> {
+    if (modeRef.current === "live") {
+      try {
+        const r = await api.openAccounts(associationId);
+        await loadAssociation(associationId, { silent: true });
+        return { ok: true, value: { opened: r.opened, pending: r.pending, total: r.total } };
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 403) return { ok: false, error: "not_exco" };
+        return { ok: false, error: "network" };
+      }
+    }
+    await wait(1200);
+    if (!isExco(associationId)) return { ok: false, error: "not_exco" };
+    let opened = 0;
+    update((draft) => {
+      for (const r of draft.roster) {
+        if (r.associationId !== associationId || r.accountStatus === "opened") continue;
+        r.accountStatus = "opened";
+        r.linkedAccountRef = `0${Math.floor(100000000 + rnd() * 899999999)}`;
+        opened += 1;
+      }
+      if (opened > 0) audit(draft, associationId, session!.userId, "account_opened", `Opened ${opened} Ecobank account${opened === 1 ? "" : "s"} for the roster`);
+    });
+    return { ok: true, value: { opened, pending: 0, total: opened } };
+  }
+
+  /** Open one member's Ecobank account (Account Opening Service). */
+  async function openMemberAccount(recordId: string): Promise<Result<{ accountRef: string | null }>> {
+    const record0 = dbRef.current!.roster.find((r) => r.id === recordId);
+    const associationId = record0?.associationId ?? "";
+    if (modeRef.current === "live") {
+      try {
+        const r = await api.openAccount(recordId);
+        await loadAssociation(associationId, { silent: true });
+        return { ok: true, value: { accountRef: r.account_ref } };
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 403) return { ok: false, error: "not_exco" };
+        if (e instanceof ApiError && e.status === 409) return { ok: false, error: "already_open" };
+        return { ok: false, error: "network" };
+      }
+    }
+    await wait(800);
+    if (!associationId || !isExco(associationId)) return { ok: false, error: "not_exco" };
+    if (!record0) return { ok: false, error: "not_found" };
+    if (record0.accountStatus === "opened") return { ok: false, error: "already_open" };
+    const ref = `0${Math.floor(100000000 + rnd() * 899999999)}`;
+    update((draft) => {
+      const r = draft.roster.find((x) => x.id === recordId);
+      if (!r) return;
+      r.accountStatus = "opened";
+      r.linkedAccountRef = ref;
+      audit(draft, associationId, session!.userId, "account_opened", `Opened an Ecobank account for ${r.name}`);
+    });
+    return { ok: true, value: { accountRef: ref } };
+  }
+
+  /** Authorize a direct-debit mandate so dues can be pulled automatically. */
+  async function authorizeDirectDebit(recordId: string): Promise<Result<{ mandateRef: string }>> {
+    const record0 = dbRef.current!.roster.find((r) => r.id === recordId);
+    const associationId = record0?.associationId ?? "";
+    if (modeRef.current === "live") {
+      try {
+        const r = await api.authorizeDirectDebit(recordId);
+        await loadAssociation(associationId, { silent: true });
+        return { ok: true, value: { mandateRef: r.mandate_ref } };
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 403) return { ok: false, error: "not_exco" };
+        if (e instanceof ApiError && e.status === 409) return { ok: false, error: "no_account" };
+        return { ok: false, error: "network" };
+      }
+    }
+    await wait(900);
+    if (!associationId || !isExco(associationId)) return { ok: false, error: "not_exco" };
+    if (!record0) return { ok: false, error: "not_found" };
+    if (record0.accountStatus !== "opened") return { ok: false, error: "no_account" };
+    const ref = `MND-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    update((draft) => {
+      const r = draft.roster.find((x) => x.id === recordId);
+      if (!r) return;
+      r.mandateStatus = "active";
+      r.mandateRef = ref;
+      audit(draft, associationId, session!.userId, "mandate_authorized", `Authorized a direct-debit mandate for ${r.name}`);
+    });
+    return { ok: true, value: { mandateRef: ref } };
   }
 
   async function openCycle(input: { associationId: string; title: string; amount: number; perLevel: Partial<Record<Level, number>> | null; expectationStatement: string | null; deadline: string }): Promise<Result<string>> {
@@ -1431,6 +1524,9 @@ function useStoreValue() {
     recordManualPayment,
     importRoster,
     sendInvites,
+    openAccounts,
+    openMemberAccount,
+    authorizeDirectDebit,
     openCycle,
     closeCycle,
     ask,

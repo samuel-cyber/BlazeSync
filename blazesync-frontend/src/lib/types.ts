@@ -58,6 +58,19 @@ export interface ExcoMember {
 
 export type Level = "100L" | "200L" | "300L" | "400L" | "500L";
 
+/**
+ * Ecobank account-opening lifecycle for a member (Account Opening Service).
+ * `none` → not started, `opening_pending` → Ecobank is provisioning the
+ * account, `opened` → `linkedAccountRef` is live.
+ */
+export type AccountStatus = "none" | "opening_pending" | "opened";
+
+/**
+ * Direct-debit mandate (Payment From Ecobank Account). `active` is what
+ * unlocks an automatic dues pull; `null` means no mandate yet.
+ */
+export type MandateStatus = "pending" | "active" | "revoked" | null;
+
 /** A roster entry: who is expected to pay, whether or not they use the app. */
 export interface MemberRecord {
   id: string;
@@ -77,11 +90,13 @@ export interface MemberRecord {
   };
   source: "roster" | "join_code";
   /** Ecobank account-opening lifecycle (spec: open account, then mandate). */
-  accountStatus: "none" | "opening_pending" | "opened";
+  accountStatus: AccountStatus;
   /** The member's Ecobank account number, set once account opening completes. */
   linkedAccountRef: string | null;
   /** Direct-debit mandate status — "active" enables automatic dues pulls. */
-  mandateStatus: "pending" | "active" | "revoked" | null;
+  mandateStatus: MandateStatus;
+  /** Ecobank mandate reference, present once the mandate is authorized. */
+  mandateRef: string | null;
 }
 
 export interface DuesCycle {
@@ -222,6 +237,8 @@ export type AuditAction =
   | "payout_rejected"
   | "payout_completed"
   | "account_linked"
+  | "account_opened"
+  | "mandate_authorized"
   | "rule_changed"
   | "exco_invited";
 

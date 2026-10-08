@@ -1,5 +1,12 @@
 # API contract the frontend expects
 
+> **⚠️ SUPERSEDED — historical document.** This file describes the *original*
+> planned contract (virtual accounts, `/me/associations`, `/cycles/{id}/payments`,
+> the `Idempotency-Key` header, integer-kobo ids, `PUT`/`DELETE`). The backend has
+> since moved to **Account Opening + Direct Debit** and a real `api.ts`.
+> The current, authoritative contract is **`BLAZESYNC_FRONTEND_HANDOFF.md`**
+> (repo root). Keep this file only for historical context.
+
 What each screen needs from the FastAPI backend. Shapes are the types in
 `src/lib/types.ts`. Money is always integer **kobo**. Times are ISO 8601 UTC.
 Every call is scoped by `association_id`, and every state-changing call writes

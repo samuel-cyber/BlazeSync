@@ -96,6 +96,9 @@
 | `/api/v1/associations/{assoc_id}/roster` | GET | treasurer or exco | status dashboard (below) |
 | `/api/v1/roster/claim` | POST | any authed user | claim own invite (below) |
 | `/api/v1/associations/{assoc_id}/roster/{member_record_id}/mark-paid` | POST | treasurer | `{ "amount"?: number, "note"?: string }` → `{ "ok", "payment_id", "amount" }` |
+| `/api/v1/associations/{assoc_id}/roster/open-accounts` | POST | treasurer | **bulk** open an Ecobank account for every member who lacks one → `{ "ok", "opened", "pending", "total" }` (idempotent; mock mode opens instantly) |
+| `/api/v1/member-records/{member_record_id}/open-account` | POST | treasurer | open one member's account → `{ "ok", "member_record_id", "account_status", "account_ref" }` |
+| `/api/v1/member-records/{member_record_id}/authorize-direct-debit` | POST | treasurer | register the member's debit mandate → `{ "ok", "member_record_id", "mandate_ref", "status" }` (requires an opened account; `409` otherwise) |
 
 **Upload response** (201): `{ "created": 52, "invites": [ { "name", "email", "invite_code" } ], "note": "..." }` — invite codes are visible here once; your UI should let the treasurer copy them.
 
@@ -106,14 +109,41 @@
   "summary": { "total": 52, "claimed": 38, "unclaimed": 14 },
   "items": [
     { "id": "uuid", "name": "Ada", "matric_number": "CSC/21/0142", "email": "...",
-      "phone": null, "claimed": true, "claimed_by": "Ada Obi",
-      "invite_status": "claimed", "paid": true }
+      "phone": null, "claimed": true, "claimed_by": "Ada Obi", "claimed_by_id": "uuid"|null,
+      "level": "300L", "invite_status": "claimed", "paid": true,
+      "linked_account_ref": "EB-..."|null,
+      "account_status": "none"|"opening_pending"|"opened",
+      "mandate_status": "pending"|"active"|"revoked"|null,
+      "mandate_ref": "MND-..."|null }
   ]
 }
 ```
+`account_status` and `mandate_status` drive the **account-opening → authorize → pay**
+gate (see §5a). Show a per-member badge so the treasurer knows whose mandate is
+active before asking them to pay.
 `cycle` is `null` when no active cycle exists — show the designed empty state, not an error. `paid` is `null` when there's no active cycle.
 
 **Claim flow** (`POST /roster/claim`): body `{ "invite_code": "...", "email": "ada@uni.edu.ng" }` (email or phone must **match the roster record** — identity check is enforced server-side). → `{ "ok": true, "association_id": "uuid", "member_record_id": "uuid" }`. Errors: `404` unknown code, `403` identity mismatch, `409` already claimed. The invite link your app generates should carry the code; after register/login, post the code + the user's email.
+
+### 5a. Account opening & direct-debit mandates (NEW — the money rails)
+
+This replaced the old "virtual account" model. A member can only **pay** after
+two steps, in order:
+
+1. **Open the member's Ecobank account** — `POST /associations/{assoc_id}/roster/open-accounts`
+   (bulk, treasurer) or `POST /member-records/{id}/open-account` (single). Moves
+   `account_status` `none → opening_pending → opened`. In mock mode it's instant
+   and returns a deterministic demo account number; live it can settle
+   asynchronously and complete via the `account_opened` webhook.
+2. **Authorize direct debit** — `POST /member-records/{id}/authorize-direct-debit`
+   (treasurer). Registers the member's mandate (`Payment From Ecobank Account`).
+   `409` if the account isn't opened yet. Sets `mandate_status` `pending → active`
+   (a mock/live provider can also fire the `mandate_activated` webhook).
+
+**UI duties**: an exco "Open accounts" bulk button + per-member "Open account"
+and "Authorize direct debit" actions on the members screen; render
+`account_status` / `mandate_status` badges; a member-facing note on the pay
+screen when their mandate isn't active yet (the pay call returns `409`, §6).
 
 ---
 
@@ -130,7 +160,19 @@
 
 Cycle object: `{ "id", "association_id", "title", "amount": "2500.00", "deadline": "iso", "status": "active", "created_at": "iso" }`.
 
-**Pay**: `idempotency_key` is **client-generated** (e.g. `crypto.randomUUID()`), must be stable across retries of the same payment attempt — regenerate per *new* payment, never per retry. `403` if the user hasn't claimed a roster invite in that association (good moment to route to the claim flow). Payment object returned:
+**Pay**: `idempotency_key` is **client-generated** (e.g. `crypto.randomUUID()`), must be stable across retries of the same payment attempt — regenerate per *new* payment, never per retry.
+
+- `paid_via` is **only** `blaze | other | manual`. There is **no** `bank_transfer`,
+  `card`, `cash` or `direct_transfer` on the wire — map your UI's extra payment
+  methods onto `other` (a `422` means an unmapped channel leaked through). Manual
+  exco payments use `manual`.
+- `403` if the user hasn't claimed a roster invite in that association (route to
+  the claim flow).
+- `409` **`"No active direct-debit mandate …"`** if the member has no opened
+  account / active mandate (route to §5a: open account → authorize). This is the
+  new gate the pay screen must handle.
+
+Payment object returned:
 ```json
 { "id": "uuid", "dues_cycle_id": "uuid", "amount": "2500.00", "paid_via": "blaze",
   "status": "success", "ecobank_transaction_ref": "EBK-...", "timestamp": "iso",

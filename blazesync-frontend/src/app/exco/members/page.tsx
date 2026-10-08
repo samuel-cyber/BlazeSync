@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { CheckCircle2, CircleDashed, HandCoins, MailPlus, Search, Smartphone, Upload, UserX, Users } from "lucide-react";
+import { CheckCircle2, CircleDashed, HandCoins, Landmark, MailPlus, Search, Smartphone, Upload, UserX, Users } from "lucide-react";
 import { Suspense, useMemo, useState } from "react";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Callout, Dialog, EmptyState, Meter, PageHeader, Panel, Segmented, Tag } from "@/components/ui/bits";
@@ -16,7 +16,7 @@ type Filter = "all" | "unpaid" | "paid" | "not_joined";
 
 function Members() {
   const params = useSearchParams();
-  const { db, session, sendInvites } = useDb();
+  const { db, session, sendInvites, openAccounts, openMemberAccount, authorizeDirectDebit } = useDb();
   const toast = useToast();
   const assocId = session!.associationId;
   const assoc = selectAssociation(db, assocId)!;
@@ -28,6 +28,34 @@ function Members() {
   const [level, setLevel] = useState<Level | "all">("all");
   const [paying, setPaying] = useState<MemberRecord | null>(null);
   const [inviting, setInviting] = useState<MemberRecord[] | null>(null);
+  const [openingAll, setOpeningAll] = useState(false);
+  const [accountBusy, setAccountBusy] = useState<string | null>(null);
+
+  const notOpen = roster.filter((r) => r.accountStatus !== "opened");
+
+  const openAll = async () => {
+    setOpeningAll(true);
+    const r = await openAccounts(assocId);
+    setOpeningAll(false);
+    if (r.ok) toast(r.value.opened ? `Opened ${plural(r.value.opened, "Ecobank account")}. Now authorize each member's direct-debit mandate.` : "Every account was already open.");
+    else toast(r.error === "not_exco" ? "Only the treasurer can open accounts." : "Couldn't reach Ecobank. Try again.");
+  };
+
+  const openOne = async (r: MemberRecord) => {
+    setAccountBusy(r.id);
+    const res = await openMemberAccount(r.id);
+    setAccountBusy(null);
+    if (res.ok) toast(`Account opened for ${firstName(r.name)} — now authorize their direct-debit mandate.`);
+    else toast(res.error === "already_open" ? "That account is already open." : res.error === "not_exco" ? "Only the treasurer can open accounts." : "Couldn't reach Ecobank. Try again.");
+  };
+
+  const authorize = async (r: MemberRecord) => {
+    setAccountBusy(r.id);
+    const res = await authorizeDirectDebit(r.id);
+    setAccountBusy(null);
+    if (res.ok) toast(`Direct-debit mandate active for ${firstName(r.name)}. Dues can now be pulled automatically.`);
+    else toast(res.error === "no_account" ? "Open their Ecobank account first." : res.error === "not_exco" ? "Only the treasurer can authorize mandates." : "Couldn't reach Ecobank. Try again.");
+  };
 
   const paidOf = (r: MemberRecord) => (cycle ? selectPaymentFor(db, r.id, cycle.id) : null);
   const counts = {
@@ -77,6 +105,11 @@ function Members() {
             <ButtonLink href="/exco/members/import" variant="secondary" size="sm">
               <Upload aria-hidden className="size-4" /> Upload roster
             </ButtonLink>
+            {notOpen.length > 0 && (
+              <Button size="sm" variant="secondary" busy={openingAll} onClick={openAll}>
+                <Landmark aria-hidden className="size-4" /> Open {notOpen.length} Ecobank {notOpen.length === 1 ? "account" : "accounts"}
+              </Button>
+            )}
             {notJoined.length > 0 && (
               <Button size="sm" onClick={() => setInviting(notJoined)}>
                 <MailPlus aria-hidden className="size-4" /> Invite {notJoined.length} who haven&apos;t joined
@@ -157,6 +190,7 @@ function Members() {
                   <span className="hidden text-sm md:block">{r.level}</span>
                   <span className="col-start-1 flex flex-wrap gap-1.5 md:col-start-auto">
                     {appStatus(r)}
+                    {bankStatus(r)}
                     <span className="md:hidden">
                       {duesStatus(r)}
                     </span>
@@ -164,8 +198,16 @@ function Members() {
                   <span className="hidden md:block">
                     {duesStatus(r)}
                   </span>
-                  <span className="col-start-2 row-span-2 row-start-1 flex justify-end md:col-start-auto md:row-span-1 md:row-start-auto">
-                    {cycle && !p ? (
+                  <span className="col-start-2 row-span-2 row-start-1 flex flex-wrap items-center justify-end gap-2 md:col-start-auto md:row-span-1 md:row-start-auto">
+                    {r.accountStatus !== "opened" ? (
+                      <Button size="sm" variant="secondary" busy={accountBusy === r.id} onClick={() => openOne(r)}>
+                        <Landmark aria-hidden className="size-3.5" /> Open account
+                      </Button>
+                    ) : r.mandateStatus !== "active" ? (
+                      <Button size="sm" variant="secondary" busy={accountBusy === r.id} onClick={() => authorize(r)}>
+                        <Landmark aria-hidden className="size-3.5" /> Authorize debit
+                      </Button>
+                    ) : cycle && !p ? (
                       <Button size="sm" variant="secondary" onClick={() => setPaying(r)}>
                         Mark paid
                       </Button>
@@ -200,6 +242,14 @@ function Members() {
     if (r.invite.status === "sent") return <Tag icon={<MailPlus aria-hidden className="size-3" />}>Invited {r.invite.sentAt ? fmtDate(r.invite.sentAt) : ""}</Tag>;
     if (r.invite.status === "expired") return <Tag tone="warn">Invite expired</Tag>;
     return <Tag icon={<UserX aria-hidden className="size-3" />}>Not invited</Tag>;
+  }
+
+  function bankStatus(r: MemberRecord) {
+    if (r.accountStatus === "opened" && r.mandateStatus === "active")
+      return <Tag tone="credit" icon={<Landmark aria-hidden className="size-3" />}>Direct debit</Tag>;
+    if (r.accountStatus === "opened") return <Tag icon={<Landmark aria-hidden className="size-3" />}>Account open</Tag>;
+    if (r.accountStatus === "opening_pending") return <Tag tone="warn" icon={<Landmark aria-hidden className="size-3" />}>Opening…</Tag>;
+    return null;
   }
 
   function duesStatus(r: MemberRecord) {
